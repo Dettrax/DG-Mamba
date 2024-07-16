@@ -1,0 +1,46 @@
+DEBUG:root:{'K': 2, 'lookback': 2, 'p_test': 0.0, 'p_val': 0.1, 'p_nodes': 0.0, 'n_hidden': [512], 'max_iter': 700, 'tolerance': 100, 'time_list': [1, 5, 10, 20, 25, 50, 60, 80, 99], 'L_list': [64], 'save_time_complex': True, 'save_MRR_MAP': True, 'save_sigma_mu': True, 'scale': False, 'seed': 0, 'verbose': True}
+DEBUG:root:The code will be running on cuda:0
+DEBUG:root:Training
+DEBUG:root:4
+DEBUG:root:L:64, Epoch: 0, Timestep: 4, Loss: 0.08220235258340836, MAP: 0.11641836975237484, MRR: 0.38121139248498814
+DEBUG:root:Training
+DEBUG:root:5
+DEBUG:root:L:64, Epoch: 0, Timestep: 5, Loss: 0.07764331251382828, MAP: 0.08353490498520251, MRR: 0.34517495281605864
+DEBUG:root:Training
+DEBUG:root:6
+DEBUG:root:L:64, Epoch: 0, Timestep: 6, Loss: 0.07503186166286469, MAP: 0.10291650849060176, MRR: 0.34923990073734057
+DEBUG:root:Training
+DEBUG:root:7
+DEBUG:root:L:64, Epoch: 0, Timestep: 7, Loss: 0.07095582038164139, MAP: 0.11874717963297717, MRR: 0.34254932168686275
+DEBUG:root:Training
+DEBUG:root:8
+DEBUG:root:L:64, Epoch: 0, Timestep: 8, Loss: 0.06660117208957672, MAP: 0.06836490689389887, MRR: 0.37355262420512986
+DEBUG:root:Training
+DEBUG:root:4
+DEBUG:root:L:64, Epoch: 1, Timestep: 4, Loss: 0.06884754449129105, MAP: 0.11191718836064529, MRR: 0.38374540039502203
+DEBUG:root:Training
+DEBUG:root:5
+DEBUG:root:L:64, Epoch: 1, Timestep: 5, Loss: 0.06554672867059708, MAP: 0.10508289139221388, MRR: 0.34268891970263377
+DEBUG:root:Training
+DEBUG:root:6
+DEBUG:root:L:64, Epoch: 1, Timestep: 6, Loss: 0.06449921429157257, MAP: 0.10246968529258517, MRR: 0.3479782765270131
+DEBUG:root:Training
+DEBUG:root:7
+DEBUG:root:L:64, Epoch: 1, Timestep: 7, Loss: 0.06105085089802742, MAP: 0.11786444064738902, MRR: 0.3496654612175126
+DEBUG:root:Training
+DEBUG:root:8
+DEBUG:root:L:64, Epoch: 1, Timestep: 8, Loss: 0.057481274008750916, MAP: 0.08918195713181136, MRR: 0.36158058333935056
+DEBUG:root:Training
+DEBUG:root:4
+DEBUG:root:L:64, Epoch: 2, Timestep: 4, Loss: 0.061358530074357986, MAP: 0.08043612814208596, MRR: 0.3837413005555163
+DEBUG:root:Training
+DEBUG:root:5
+DEBUG:root:L:64, Epoch: 2, Timestep: 5, Loss: 0.05816805362701416, MAP: 0.10547525660237704, MRR: 0.345801396534042
+DEBUG:root:Training
+DEBUG:root:6
+DEBUG:root:L:64, Epoch: 2, Timestep: 6, Loss: 0.05747387185692787, MAP: 0.10809837134973041, MRR: 0.3480728656128767
+DEBUG:root:Training
+DEBUG:root:7
+DEBUG:root:L:64, Epoch: 2, Timestep: 7, Loss: 0.053856756538152695, MAP: 0.11288700126252665, MRR: 0.3490005214366018
+DEBUG:root:Training
+DEBUG:root:8
