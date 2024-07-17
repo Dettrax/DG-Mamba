@@ -76,12 +76,15 @@ def unison_shuffled_copies(a, b, seed):
     p = torch.randperm(len(a))
     return a[p], b[p]
 
-def find_and_sample_zero_entries(dense_tensor, num_samples=None):
+def find_and_sample_zero_entries(sparse_matrix, num_samples=None):
+    # Convert sparse matrix to dense format
+    dense_matrix = sparse_matrix.toarray()
+
     # Create a boolean array: True where elements are zero
-    zero_mask = dense_tensor == 0
+    zero_mask = dense_matrix == 0
 
     # Get the indices of zero elements
-    zero_indices = torch.nonzero(zero_mask, as_tuple=False)
+    zero_indices = np.argwhere(zero_mask)
 
     # Check if sampling is requested
     if num_samples is not None and num_samples > 0:
@@ -89,7 +92,7 @@ def find_and_sample_zero_entries(dense_tensor, num_samples=None):
         if num_samples > len(zero_indices):
             raise ValueError("Requested more samples than available zeros.")
         # Sample indices randomly without replacement
-        sampled_indices = zero_indices[torch.randperm(len(zero_indices))[:num_samples]]
+        sampled_indices = zero_indices[np.random.choice(len(zero_indices), num_samples, replace=False)]
         return sampled_indices
     return zero_indices
 
@@ -109,7 +112,7 @@ def get_inf(data, mu_64, sigma_64, lookback):
             if ctr < 35:
                 ones_edj = A.nnz
                 zeroes_edj = A.shape[0] * 100
-                tot = ones_edj + zeroes_edj
+
 
                 # Ensure A is in COO format
                 A_coo = A.tocoo() if not isinstance(A, coo_matrix) else A
@@ -117,7 +120,7 @@ def get_inf(data, mu_64, sigma_64, lookback):
                 # Get the pairs directly from the COO format properties
                 val_ones = torch.tensor(np.vstack((A_coo.row, A_coo.col)).T, dtype=torch.long, device=device)
 
-                val_zeros = find_and_sample_zero_entries(torch.tensor(A.toarray(), device=device), zeroes_edj)
+                val_zeros = torch.tensor((find_and_sample_zero_entries(A, zeroes_edj)), dtype=torch.long, device=device)
 
                 val_edges = torch.cat([val_ones, val_zeros], dim=0)
 

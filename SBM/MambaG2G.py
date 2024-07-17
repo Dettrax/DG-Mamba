@@ -239,21 +239,21 @@ mu_L_arr = []
 if save_sigma_mu == True:
     sigma_L_arr.append(sigma_timestamp)
     mu_L_arr.append(mu_timestamp)
-import time
-start = time.time()
-MAPS = []
-MRR = []
-for i in tqdm(range(5)):
-    curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
-    MAPS.append(curr_MAP)
-    MRR.append(curr_MRR)
-#print mean and std of map and mrr
-print("Mean MAP: ", np.mean(MAPS))
-print("Mean MRR: ", np.mean(MRR))
-print("Std MAP: ", np.std(MAPS))
-print("Std MRR: ", np.std(MRR))
-print("Time taken: ", time.time()-start)
-
+# import time
+# start = time.time()
+# MAPS = []
+# MRR = []
+# for i in tqdm(range(5)):
+#     curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
+#     MAPS.append(curr_MAP)
+#     MRR.append(curr_MRR)
+# #print mean and std of map and mrr
+# print("Mean MAP: ", np.mean(MAPS))
+# print("Mean MRR: ", np.mean(MRR))
+# print("Std MAP: ", np.std(MAPS))
+# print("Std MRR: ", np.std(MRR))
+# print("Time taken: ", time.time()-start)
+#
 
 
 import time
