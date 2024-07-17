@@ -416,13 +416,13 @@ class dataset_as(torch.utils.data.Dataset):
         self.X_Sparse_arr = []
         count = 0
         max_size = 0
-        print(self.graph_filename)
+
         for filename in self.graph_filename:
             logging.debug(count)
             A, X_Sparse, size = self.get_graph(filename, max_size)
             if size > max_size:
                 max_size = size
-            print(count)
+
             self.Adj_arr.append(A)
             self.X_Sparse_arr.append(X_Sparse)
             count = count + 1

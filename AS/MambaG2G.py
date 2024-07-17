@@ -2,131 +2,139 @@
 # We have used some of the functionalities from Xu, M., Singh, A.V. &
 # Karniadakis G.K. "DynG2G: An efficient Stochastic Graph Embedding
 # Method for Temporal Graphs".
+import torch.cuda
+from torch.utils.data import Dataset
+
 import os
 try :
     os.chdir("AS")
 except:
     pass
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-from matplotlib import pyplot as plt
+from tqdm import tqdm
+from mamba_ssm import Mamba
 from models import *
 from utils import *
 import pickle
 import json
-from mamba import Mamba, MambaConfig
+
 # hyperparams
 dim_out = 64
-dim_in = 65535
+dim_in  = 65535
+
+dim_val = 256
 
 
-
-n_heads = 1
-n_encoder_layers = 1
-
-f = open("config.json")
-config = json.load(f)
-lookback = config["lookback"]
 
 # Check GPU availability
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
-# init network and optimizer
-# t = Graph2Gauss_Torch(dim_val, dim_attn, dim_in, dim_out, n_encoder_layers, n_heads, lookback)
+class ASDataset(Dataset):
+    def __init__(self, data, lookback):
+        self.data = data
+        self.lookback = lookback
+        # self.data_len = data.shape[0]
+        self.triplet_dict_data, self.scale_dict_data = self.temp_process(data, lookback)
 
 
+    def temp_process(self, data, lookback):
+
+        hop_dict = {}
+        scale_terms_dict = {}
+
+        for i in range(lookback, 100):
+            hops = get_hops(data[i][0], 2)
+            scale_terms = {h if h != -1 else max(hops.keys()) + 1:
+                               hops[h].sum(1).A1 if h != -1 else hops[1].shape[0] - hops[h].sum(1).A1
+                           for h in hops}
+            hop_dict[i] = hops
+            scale_terms_dict[i] = scale_terms
+
+        # Construct dict of triplets
+        triplet_dict = {}
+        scale_dict = {}
+
+        for i in range(lookback, 100):
+            triplet, scale = to_triplets(sample_all_hops(hop_dict[i]), scale_terms_dict[i])
+            triplet_dict[i] = triplet
+            scale_dict[i] = scale
+
+        return triplet_dict, scale_dict
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+
+
+
+        triplet = self.triplet_dict_data[idx]
+        scale = self.scale_dict_data[idx]
+        return  triplet, scale
 
 # Get dataset and construct dict
 data = dataset_as('../datasets/as_data')
-"""dataset = {}
-for i in range(lookback, 13):    #lookback + 1 because ignore timestamp 2
-    B = np.zeros((50825,lookback+1,50825))
-    for j in range(lookback+1):
-        adj_matr = data[i-lookback+j][0].todense()
-        B[:adj_matr.shape[0],j,:adj_matr.shape[1]] = adj_matr
-    print(f"Timestamp: {i}, Adj matrix shape: {adj_matr.shape}")
-    dataset[i] = B"""
 
-# Construct dict of hops and scale terms
-hop_dict = {}
-scale_terms_dict = {}
-print("Constructing dict of hops and scale terms")
-for i in range(lookback, 100):
-    hops = get_hops(data[i][0], 2)
-    scale_terms = {h if h != -1 else max(hops.keys()) + 1:
-                       hops[h].sum(1).A1 if h != -1 else hops[1].shape[0] - hops[h].sum(1).A1
-                   for h in hops}
-    hop_dict[i] = hops
-    scale_terms_dict[i] = scale_terms
-
-# Construct dict of triplets
-triplet_dict = {}
-scale_dict = {}
-print("Constructing dict of triplets")
-for i in range(lookback, 100):
-    triplet, scale = to_triplets(sample_all_hops(hop_dict[i]), scale_terms_dict[i])
-    triplet_dict[i] = triplet
-    scale_dict[i] = scale
-
-# for i in range(lookback,13):
-#    dataset[i] = torch.tensor(dataset[i], dtype = torch.float32)
 
 # Train/Val/Test split
-'''
-train_data = {}
-for i in range(lookback,95):
-    train = torch.tensor(dataset[i], dtype = torch.float32)
-    #train_data[i] = train.to(device)
-    train_data[i] = train
+#
+# train_data = {}
+# for i in range(lookback, 62):
+#     train = torch.tensor(dataset[i], dtype=torch.float32)
+#     train_data[i] = train.to(device)
+#
+# val_data = {}
+# for i in range(62, 71):
+#     val = torch.tensor(dataset[i], dtype=torch.float32)
+#     val_data[i] = val.to(device)
+#
+# test_data = {}
+# for i in range(71, 88):
+#     test = torch.tensor(dataset[i], dtype=torch.float32)
+#     test_data[i] = test.to(device)
 
-val_data = {}
-for i in range(95,109):
-    val = torch.tensor(dataset[i], dtype = torch.float32)
-    #val_data[i] = val.to(device)
-    val_data[i] = val
 
-test_data = {}
-for i in range(109,137):
-    test = torch.tensor(dataset[i], dtype = torch.float32)
-    #test_data[i] = test.to(device)
-    test_data[i] = test
-'''
+def val_loss(t,val_data,lookback):
+    l = []
+    t.eval()
+    for i in range(70,80):
+        triplet, scale = val_data[i]
+        dataset = []
+        for j in range(lookback+1):
+            dataset.append(data[i-lookback+j][1].to(device))
+        _, muval, sigmaval = t(dataset)
+        val_l = build_loss(triplet, scale, muval, sigmaval, dim_out, scale=False)
+        l.append(val_l.cpu().detach().numpy())
+    return np.mean(l)
 
 
 class MambaG2G(torch.nn.Module):
-    def __init__(self, config: MambaConfig, dim_in, dim_out, dropout=0.2):
+    def __init__(self, config, lin_dim, dim_out,dim_val, dropout=0.2):
         super(MambaG2G, self).__init__()
-        self.D = dim_in
+        self.D = lin_dim
         self.elu = nn.ELU()
-        self.mamba = Mamba(config)
-        self.enc_input_fc = SparseLinear(dim_in, dim_val)
-        self.red_input_fc = SparseLinear(dim_in, dim_val)
+        self.mamba = Mamba(d_model=config['d_model'], d_state=config['d_state'], d_conv=config['d_conv'])
 
         # self.enc_input_fc = nn.Linear(dim_in, dim_in)
         self.dropout = nn.Dropout(p=dropout)  # Add Dropout layer
-        self.out_fc = nn.Linear(config.d_model, self.D)  # Adjusted to match output dimension
-        self.sigma_fc = nn.Linear(dim_val, dim_out)
-        self.mu_fc = nn.Linear(dim_val, dim_out)
+        self.out_fc = nn.Linear(config['d_model'], self.D)  # Adjusted to match output dimension
+        self.sigma_fc = nn.Linear(self.D, dim_out)
+        self.mu_fc = nn.Linear(self.D, dim_out)
+        self.enc_input_fc = SparseLinear(dim_in, dim_val)
+
 
     def forward(self, input):
-        # e = self.enc_input_fc(input)
         out_tuple = ()
         for inp_mat in input:
             out_mat = self.enc_input_fc(inp_mat)
-            out_mat = self.red_input_fc(out_mat.T).T
             out_tuple += (out_mat,)
-        z = torch.stack(out_tuple, 1)
-
+        z = torch.stack(out_tuple,1)
         e = self.mamba(z)
         e = e.mean(dim=1)  # Average pooling to maintain the expected shape
         e = self.dropout(e)  # Apply dropout after average pooling
         x = torch.tanh(self.out_fc(e))
         x = self.elu(x)
-        x = self.dropout(x).T  # Apply dropout after the activation
-
+        x = self.dropout(x)  # Apply dropout after the activation
         mu = self.mu_fc(x)
         sigma = self.sigma_fc(x)
         sigma = self.elu(sigma) + 1 + 1e-14
@@ -134,97 +142,77 @@ class MambaG2G(torch.nn.Module):
         return x, mu, sigma
 
 
-def val_loss(t):
-    l = []
-    for i in range(70, 80):
-        # B = np.zeros((50825,lookback+1,50825))
-        dataset = []
-        for j in range(lookback + 1):
-            dataset.append(data[i - lookback + j][1].to(device))
-            # B[:adj_matr.shape[0],j,:adj_matr.shape[1]] = adj_matr
-        # print(f"Timestamp: {i}")#, Adj matrix shape: {adj_matr.shape}")
-        # dataset = B
-        # dataset = torch.tensor(dataset,dtype = torch.float32)
-        _, muval, sigmaval = t(dataset)
-        val_l = build_loss(triplet_dict[i], scale_dict[i], muval, sigmaval, 64, scale=False)
-        l.append(val_l.cpu().detach().numpy())
-    return np.mean(l)
+def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay):
+    dataset = ASDataset(data, lookback)
 
 
-dim_val = 256
-dim_attn = 256
-lr = 0.001
-config = MambaConfig(
-    d_model=dim_val,
-    n_layers=2,
-    d_state=32,
-    d_conv=4,
-)
+    config = {
+        'd_model':dim_val,
+        'd_state':d_state,
+        'd_conv':d_conv
+    }
 
+    model = MambaG2G(config, lin_dim, dim_out,dim_val, dropout=dropout).to(device)
+    #print total model parameters
+    print('Total parameters:', sum(p.numel() for p in model.parameters()))
 
-t = MambaG2G(config, dim_in, dim_out)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    val_losses = []
+    train_loss = []
+    test_loss = []
+    best_MAP = 0
+    for e in tqdm(range(10)):
+        model.train()
+        loss_step = []
+        for i in range(lookback,70):
+            triplet, scale = dataset[i]
+            temp_data = []
+            for j in range(lookback + 1):
+                temp_data.append(data[i - lookback + j][1].to(device))
 
-optimizer = torch.optim.Adam(t.parameters(), lr=lr)
-# sched = ScheduledOptim(optimizer,lr_mul = 0.1, d_model = 256, n_warmup_steps = 130)
-t.to(device)
+            optimizer.zero_grad()
+            _, mu, sigma = model(temp_data)
+            torch.cuda.empty_cache()
+            # loss = build_loss(triplet_dict[i], scale_dict[i],mu,sigma,64, scale = False)
+            loss = build_loss(triplet, scale, mu, sigma, dim_out, scale=False)
+            loss_step.append(loss.cpu().detach().numpy())
+            # print(f"Epoch: {e}, Timestamp: {i},Loss: {loss_list[-1]}")
+            '''if i==lookback:
+                print(triplet)'''
+            loss.backward()
+            optimizer.step()
+        val_losses.append(val_loss(model,dataset,lookback))
+        train_loss.append(np.mean(loss_step))
 
-epochs = 10
-loss_mainlist = []
-val_mainlist = []
-for e in range(epochs):
-    loss_list = []
-    for i in range(lookback, 5):
-        triplet, scale = to_triplets(sample_all_hops(hop_dict[i]), scale_terms_dict[i])
-        # sched.zero_grad()
-        optimizer.zero_grad()
-        # B = np.zeros((50825,lookback+1,50825))
-        dataset = []
-        for j in range(lookback + 1):
-            dataset.append(data[i - lookback + j][1].to(device))
-            # B[:adj_matr.shape[0],j,:adj_matr.shape[1]] = adj_matr
-        # print(f"Timestamp: {i}")#, Adj matrix shape: {adj_matr.shape}")
-        # dataset = B
+        print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {np.mean(np.stack(val_losses))}")
 
-        # dataset = torch.tensor(dataset, dtype = torch.float32)
-        _, mu, sigma = t(dataset)
-        # loss = build_loss(triplet_dict[i], scale_dict[i],mu,sigma,64, scale = False)
-        loss = build_loss(triplet, scale, mu, sigma, 64, scale=False)
-        loss_list.append(loss.cpu().detach().numpy())
-        # print(f"Epoch: {e}, Timestamp: {i},Loss: {loss_list[-1]}")
-        loss.backward()
-        # sched.step_and_update_lr()
-        optimizer.step()
-    # val_mainlist.append(val_loss(t))
-    loss_mainlist.append(np.mean(loss_list))
-    print(f"Epoch: {e}, Average loss: {np.mean(loss_list)}, Val loss: 0")
+        # if e %5 ==0:
+        #     mu_timestamp = []
+        #     sigma_timestamp = []
+        #     with torch.no_grad():
+        #         model.eval()
+        #         for i in range(lookback, 88):
+        #             x,  triplet, scale = dataset[i]
+        #             x = x.clone().detach().requires_grad_(False).to(device)
+        #             _, mu, sigma = model(x)
+        #             mu_timestamp.append(mu.cpu().detach().numpy())
+        #             sigma_timestamp.append(sigma.cpu().detach().numpy())
+        #
+        #     # Save mu and sigma matrices
+        #     name = 'Results/RealityMining'
+        #     save_sigma_mu = True
+        #     sigma_L_arr = []
+        #     mu_L_arr = []
+        #     if save_sigma_mu == True:
+        #         sigma_L_arr.append(sigma_timestamp)
+        #         mu_L_arr.append(mu_timestamp)
+        #     curr_MAP ,_ = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
+        #     if curr_MAP > best_MAP:
+        #         best_MAP = curr_MAP
+        #         torch.save(model.state_dict(), 'best_model.pth')
+        #         print("Best MAP: ",e, best_MAP,sep=" ")
 
+    return model , val_losses , train_loss , test_loss
 
-# plt.figure()
-# plt.semilogy(loss_mainlist)
-# plt.semilogy(val_mainlist)
-# plt.legend(['Train loss', 'Val loss'])
-# Model eval
-mu_timestamp = []
-sigma_timestamp = []
-for i in range(lookback, 100):
-    dataset = []
-    for j in range(lookback + 1):
-        dataset.append(data[i - lookback + j][1].to(device))
-
-    _, mu, sigma = t(dataset)
-    mu_timestamp.append(mu.cpu().detach().numpy())
-    sigma_timestamp.append(sigma.cpu().detach().numpy())
-
-# Save mu and sigma matrices
-name = 'Results/AS'
-save_sigma_mu = True
-sigma_L_arr = []
-mu_L_arr = []
-if save_sigma_mu == True:
-    sigma_L_arr.append(sigma_timestamp)
-    mu_L_arr.append(mu_timestamp)
-
-from eval_mod import get_MAP_avg
-
-print(get_MAP_avg(mu_L_arr, sigma_L_arr, 2))
-
+lookback = 2
+model , val_losses , train_loss , test_loss = optimise_mamba(data,lookback,26,2,4,0.288,0.001141,9.9326e-05)

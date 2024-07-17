@@ -33,7 +33,7 @@ lookback = config["lookback"]
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(device)
 
-class UCIDataset(Dataset):
+class SlashDataset(Dataset):
     def __init__(self, data, lookback):
         self.data = data
         self.lookback = lookback
@@ -42,14 +42,6 @@ class UCIDataset(Dataset):
 
 
     def temp_process(self, data, lookback):
-        # dataset = {}
-        # for i in range(lookback, 13):
-        #     B = np.zeros((dim_in, lookback + 1, dim_in))
-        #     for j in range(lookback + 1):
-        #         adj_matr = data[i - lookback + j][0].todense()
-        #         B[:adj_matr.shape[0], j, :adj_matr.shape[1]] = adj_matr
-        #
-        #     dataset[i] = B
 
         # Construct dict of hops and scale terms
         hop_dict = {}
@@ -157,7 +149,7 @@ class MambaG2G(torch.nn.Module):
 
 
 def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay):
-    dataset = UCIDataset(data, lookback)
+    dataset = SlashDataset(data, lookback)
 
 
     config = {

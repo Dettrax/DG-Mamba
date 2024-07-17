@@ -209,11 +209,17 @@ def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay)
     return model , val_losses , train_loss , test_loss
 
 lookback = 2
-model , val_losses , train_loss , test_loss = optimise_mamba(data,lookback,23,6,13,0.4951231436102613, 0.00012189604204549754, 0.0006075005337368356)
+# model , val_losses , train_loss , test_loss = optimise_mamba(data,lookback,23,6,13,0.4951231436102613, 0.00012189604204549754, 0.0006075005337368356)
 
+config = {
+    'd_model': dim_in,
+    'd_state': 13,
+    'd_conv': 6
+}
+model = MambaG2G(config, 23, dim_out, dim_val, dropout=0.495).to(device)
 dataset = SBMDataset(data, lookback)
 from eval_mod import get_MAP_avg
-
+model.load_state_dict(torch.load('best_model.pth'))
 mu_timestamp = []
 sigma_timestamp = []
 with torch.no_grad():
@@ -226,13 +232,15 @@ with torch.no_grad():
         sigma_timestamp.append(sigma.cpu().detach().numpy())
 
 # Save mu and sigma matrices
-name = 'Results/RealityMining'
+name = 'Results/SBM'
 save_sigma_mu = True
 sigma_L_arr = []
 mu_L_arr = []
 if save_sigma_mu == True:
     sigma_L_arr.append(sigma_timestamp)
     mu_L_arr.append(mu_timestamp)
+import time
+start = time.time()
 MAPS = []
 MRR = []
 for i in tqdm(range(5)):
@@ -244,5 +252,30 @@ print("Mean MAP: ", np.mean(MAPS))
 print("Mean MRR: ", np.mean(MRR))
 print("Std MAP: ", np.std(MAPS))
 print("Std MRR: ", np.std(MRR))
+print("Time taken: ", time.time()-start)
 
 
+
+import time
+from exp_mod import get_MAP_avg
+start = time.time()
+MAPS = []
+MRR = []
+for i in tqdm(range(5)):
+    curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
+    MAPS.append(curr_MAP)
+    MRR.append(curr_MRR)
+#print mean and std of map and mrr
+print("Mean MAP: ", np.mean(MAPS))
+print("Mean MRR: ", np.mean(MRR))
+print("Std MAP: ", np.std(MAPS))
+print("Std MRR: ", np.std(MRR))
+print("Time taken: ", time.time()-start)
+#
+# if save_sigma_mu == True:
+#     if not os.path.exists(name+'/Eval_Results/saved_array'):
+#         os.makedirs(name+'/Eval_Results/saved_array')
+#     with open(name+'/Eval_Results/saved_array/sigma_as','wb') as f: pickle.dump(sigma_L_arr, f)
+#     with open(name+'/Eval_Results/saved_array/mu_as','wb') as f: pickle.dump(mu_L_arr, f)
+#
+#
