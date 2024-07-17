@@ -28,7 +28,7 @@ import logging
 import json
 import pandas as pd
 from copy import deepcopy
-
+print("Pid is", os.getpid())
 
 #Read parameters from json file
 f = open("config.json")
@@ -129,11 +129,11 @@ for l_num in range(len(L_list)):
                         zeroes_edj = A.shape[0]*100
                         tot = ones_edj + zeroes_edj
 
-                        val_ones = list(set(zip(*A.nonzero())))
-                        val_ones = random.sample(val_ones, ones_edj)
-                        val_ones = [list(ele) for ele in val_ones] 
-                        val_zeros = sample_zero_n(A,zeroes_edj)
-                        val_zeros = [list(ele) for ele in val_zeros] 
+                        val_ones = list(set(zip(*A.nonzero()))) # Done
+                        val_ones = random.sample(val_ones, ones_edj) # Done
+                        val_ones = [list(ele) for ele in val_ones] #Done
+                        val_zeros = sample_zero_n(A,zeroes_edj) #Done
+                        val_zeros = [list(ele) for ele in val_zeros] #Done
                         val_edges = np.row_stack((val_ones, val_zeros))
 
                         val_ground_truth = A[val_edges[:, 0], val_edges[:, 1]].A1
@@ -150,7 +150,7 @@ for l_num in range(len(L_list)):
 
                             inp_clf = []
                             for d_id in range (tot):
-                                inp_clf.append(np.concatenate((a_embed[d_id][0], a_embed[d_id][1]), axis = 0))
+                                inp_clf.append(np.concatenate((a_embed[d_id][0], a_embed[d_id][1]), axis = 0)) #Done
 
                             inp_clf = torch.tensor(np.asarray(inp_clf))
 

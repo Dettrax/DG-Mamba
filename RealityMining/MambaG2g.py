@@ -256,7 +256,7 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
     train_loss = []
     test_loss = []
     best_MAP = 0
-    for e in tqdm(range(100)):
+    for e in tqdm(range(2)):
         model.train()
         loss_step = []
         for i in range(lookback, 63):
@@ -308,32 +308,32 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
         test_loss.append(val_loss_value)
         # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} TEst Loss: {val_loss_value}")
         # scheduler.step(val_loss_value)
-        if e %4 ==0:
-            mu_timestamp = []
-            sigma_timestamp = []
-            with torch.no_grad():
-                model.eval()
-                for i in range(lookback, 90):
-                    x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-                    x = x.clone().detach().requires_grad_(True).to(device)
-                    edge_index = edge_index.clone().detach().to(device)
-                    _, mu, sigma = model(x, edge_index)
-                    mu_timestamp.append(mu.cpu().detach().numpy())
-                    sigma_timestamp.append(sigma.cpu().detach().numpy())
-
-            # Save mu and sigma matrices
-            name = 'Results/RealityMining'
-            save_sigma_mu = True
-            sigma_L_arr = []
-            mu_L_arr = []
-            if save_sigma_mu == True:
-                sigma_L_arr.append(sigma_timestamp)
-                mu_L_arr.append(mu_timestamp)
-            curr_MAP ,_ = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
-            if curr_MAP > best_MAP:
-                best_MAP = curr_MAP
-                torch.save(model.state_dict(), 'best_model.pth')
-                print("Best MAP: ",e, best_MAP,sep=" ")
+        # if e %4 ==0:
+        #     mu_timestamp = []
+        #     sigma_timestamp = []
+        #     with torch.no_grad():
+        #         model.eval()
+        #         for i in range(lookback, 90):
+        #             x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+        #             x = x.clone().detach().requires_grad_(True).to(device)
+        #             edge_index = edge_index.clone().detach().to(device)
+        #             _, mu, sigma = model(x, edge_index)
+        #             mu_timestamp.append(mu.cpu().detach().numpy())
+        #             sigma_timestamp.append(sigma.cpu().detach().numpy())
+        #
+        #     # Save mu and sigma matrices
+        #     name = 'Results/RealityMining'
+        #     save_sigma_mu = True
+        #     sigma_L_arr = []
+        #     mu_L_arr = []
+        #     if save_sigma_mu == True:
+        #         sigma_L_arr.append(sigma_timestamp)
+        #         mu_L_arr.append(mu_timestamp)
+        #     curr_MAP ,_ = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
+        #     if curr_MAP > best_MAP:
+        #         best_MAP = curr_MAP
+        #         torch.save(model.state_dict(), 'best_model.pth')
+        #         print("Best MAP: ",e, best_MAP,sep=" ")
 
     return model , val_losses , train_loss , test_loss
 
@@ -368,14 +368,14 @@ print("Average Training Loss: ", np.mean(loss_step))
 #pplot loss
 #add legend
 # y title and x title for loss vs epoch
-from matplotlib import pyplot as plt
-plt.semilogy(val_losses)
-plt.semilogy(loss_step)
-plt.semilogy(test_loss)
-plt.legend(['Validation Loss','Training Loss','Test Loss'])
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.show()
+# from matplotlib import pyplot as plt
+# plt.semilogy(val_losses)
+# plt.semilogy(loss_step)
+# plt.semilogy(test_loss)
+# plt.legend(['Validation Loss','Training Loss','Test Loss'])
+# plt.xlabel('Epoch')
+# plt.ylabel('Loss')
+# plt.show()
 
 dataset = RMDataset(data, lookback, walk)
 #read the best_model.pt
@@ -399,17 +399,38 @@ if save_sigma_mu == True:
     sigma_L_arr.append(sigma_timestamp)
     mu_L_arr.append(mu_timestamp)
 
+import time
+start = time.time()
 MAPS = []
 MRR = []
-for i in range(5):
+for i in tqdm(range(5)):
     curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
     MAPS.append(curr_MAP)
     MRR.append(curr_MRR)
-
 #print mean and std of map and mrr
 print("Mean MAP: ", np.mean(MAPS))
 print("Mean MRR: ", np.mean(MRR))
 print("Std MAP: ", np.std(MAPS))
 print("Std MRR: ", np.std(MRR))
+print("Time taken: ", time.time() - start)
+
+from opt_eval import eff_MAP_avg
+
+start = time.time()
+MAPS = []
+MRR = []
+for i in tqdm(range(15)):
+    curr_MAP, curr_MRR = eff_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
+    MAPS.append(curr_MAP)
+    MRR.append(curr_MRR)
+#print mean and std of map and mrr
+print("Mean MAP: ", np.mean(MAPS))
+print("Mean MRR: ", np.mean(MRR))
+print("Std MAP: ", np.std(MAPS))
+print("Std MRR: ", np.std(MRR))
+print("Time taken: ", time.time() - start)
+
+
+
 
 #{'dim_in': 16, 'num_layers': 8, 'd_conv': 4, 'd_state': 32, 'dropout': 0.1589482867005636, 'lr': 0.0034744871879953997, 'weight_decay': 0.0038647580212313047}

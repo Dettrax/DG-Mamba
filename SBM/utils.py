@@ -287,7 +287,7 @@ def init_logging_handler(exp_name):
 
 def check_if_gpu():
     if torch.cuda.is_available():
-        device = 'cuda:0'
+        device = 'cuda'
     else:
         device = 'cpu'
     return device
