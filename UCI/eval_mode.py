@@ -489,7 +489,7 @@ def get_MAP_avg(mu_arr,sigma_arr,lookback,data):
                     if A_node > A_prev_node:
                         A = A[:A_prev_node, :A_prev_node]
 
-                    if ctr >= 72:
+                    if ctr >= 0:
                         # logging.debug('Testing')
                         # logging.debug(ctr)
 

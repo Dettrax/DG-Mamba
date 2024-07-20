@@ -18,7 +18,7 @@ from models import *
 from utils import *
 import pickle
 import json
-from eval_mode import get_MAP_avg
+from exp_mod import get_MAP_avg
 # hyperparams
 dim_out = 256
 dim_in = 1899
@@ -166,6 +166,7 @@ def optimise_mamba(data,lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay):
     train_loss = []
     test_loss = []
     best_MAP = 0
+    best_model = None
     for e in tqdm(range(100)):
         model.train()
         loss_step = []
@@ -200,7 +201,7 @@ def optimise_mamba(data,lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay):
                 val_samples += 1
             val_loss_value /= val_samples
         test_loss.append(val_loss_value)
-        print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {np.mean(np.stack(val_losses))}")
+        # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {np.mean(np.stack(val_losses))}")
         scheduler.step(val_loss_value)
         if e %5 ==0:
             mu_timestamp = []
@@ -225,12 +226,12 @@ def optimise_mamba(data,lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay):
             curr_MAP ,_ = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
             if curr_MAP > best_MAP:
                 best_MAP = curr_MAP
-                torch.save(model.state_dict(), 'best_model.pth')
+                best_model = model
                 print("Best MAP: ",e, best_MAP,sep=" ")
 
-    return model , val_losses , train_loss , test_loss
-
-model , val_losses , train_loss , test_loss = optimise_mamba(data,lookback,26,2,4,0.288,0.001141,9.9326e-05)
+    return best_model , val_losses , train_loss , test_loss
+lookback = 1
+model , val_losses , train_loss , test_loss = optimise_mamba(data,lookback,37,5,5,0.223,0.0012,0.000106)
 
 dataset = UCIDataset(data, lookback)
 mu_timestamp = []
@@ -252,17 +253,29 @@ mu_L_arr = []
 if save_sigma_mu == True:
     sigma_L_arr.append(sigma_timestamp)
     mu_L_arr.append(mu_timestamp)
-curr_MAP ,curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
-print("MAP: ",curr_MAP,sep=" ")
-print("MRR: ",curr_MRR,sep=" ")
 
+import time
+start = time.time()
+MAPS = []
+MRR = []
+for i in tqdm(range(5)):
+    curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data,device)
+    MAPS.append(curr_MAP)
+    MRR.append(curr_MRR)
+#print mean and std of map and mrr
+print("Mean MAP: ", np.mean(MAPS))
+print("Mean MRR: ", np.mean(MRR))
+print("Std MAP: ", np.std(MAPS))
+print("Std MRR: ", np.std(MRR))
+print("Time taken: ", time.time()-start)
 
-
-from matplotlib import pyplot as plt
-plt.semilogy(val_losses)
-plt.semilogy(train_loss)
-plt.semilogy(test_loss)
-plt.legend(['Validation Loss','Training Loss','Test Loss'])
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.show()
+#
+#
+# from matplotlib import pyplot as plt
+# plt.semilogy(val_losses)
+# plt.semilogy(train_loss)
+# plt.semilogy(test_loss)
+# plt.legend(['Validation Loss','Training Loss','Test Loss'])
+# plt.xlabel('Epoch')
+# plt.ylabel('Loss')
+# plt.show()

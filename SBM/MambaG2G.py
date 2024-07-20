@@ -193,7 +193,6 @@ def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay)
                     sigma_timestamp.append(sigma.cpu().detach().numpy())
 
             # Save mu and sigma matrices
-            name = 'Results/RealityMining'
             save_sigma_mu = True
             sigma_L_arr = []
             mu_L_arr = []
@@ -208,15 +207,16 @@ def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay)
             print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {np.mean(np.stack(val_losses))} Best MAP: {best_MAP}")
     return model , val_losses , train_loss , test_loss
 
-lookback = 2
-# model , val_losses , train_loss , test_loss = optimise_mamba(data,lookback,23,6,13,0.4951231436102613, 0.00012189604204549754, 0.0006075005337368356)
+lookback = 5
+#{'lr': 0.0030654227230925636, 'lin_dim': 47, 'd_conv': 6, 'lookback': 4, 'd_state': 25, 'dropout': 0.3725448646977555, 'weight_decay': 1.02596357976919e-05}
+model , val_losses , train_loss , test_loss = optimise_mamba(data,lookback,47,6,25,0.3725448646977555, 0.0030654227230925636, 1.02596357976919e-05)
 
-config = {
-    'd_model': dim_in,
-    'd_state': 13,
-    'd_conv': 6
-}
-model = MambaG2G(config, 23, dim_out, dim_val, dropout=0.495).to(device)
+# config = {
+#     'd_model': dim_in,
+#     'd_state': 13,
+#     'd_conv': 6
+# }
+# model = MambaG2G(config, 23, dim_out, dim_val, dropout=0.495).to(device)
 dataset = SBMDataset(data, lookback)
 from eval_mod import get_MAP_avg
 model.load_state_dict(torch.load('best_model.pth'))
@@ -239,25 +239,7 @@ mu_L_arr = []
 if save_sigma_mu == True:
     sigma_L_arr.append(sigma_timestamp)
     mu_L_arr.append(mu_timestamp)
-# import time
-# start = time.time()
-# MAPS = []
-# MRR = []
-# for i in tqdm(range(5)):
-#     curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
-#     MAPS.append(curr_MAP)
-#     MRR.append(curr_MRR)
-# #print mean and std of map and mrr
-# print("Mean MAP: ", np.mean(MAPS))
-# print("Mean MRR: ", np.mean(MRR))
-# print("Std MAP: ", np.std(MAPS))
-# print("Std MRR: ", np.std(MRR))
-# print("Time taken: ", time.time()-start)
-#
-
-
 import time
-from exp_mod import get_MAP_avg
 start = time.time()
 MAPS = []
 MRR = []
@@ -271,6 +253,24 @@ print("Mean MRR: ", np.mean(MRR))
 print("Std MAP: ", np.std(MAPS))
 print("Std MRR: ", np.std(MRR))
 print("Time taken: ", time.time()-start)
+
+
+
+# import time
+# from exp_mod import get_MAP_avg
+# start = time.time()
+# MAPS = []
+# MRR = []
+# for i in tqdm(range(5)):
+#     curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
+#     MAPS.append(curr_MAP)
+#     MRR.append(curr_MRR)
+# #print mean and std of map and mrr
+# print("Mean MAP: ", np.mean(MAPS))
+# print("Mean MRR: ", np.mean(MRR))
+# print("Std MAP: ", np.std(MAPS))
+# print("Std MRR: ", np.std(MRR))
+# print("Time taken: ", time.time()-start)
 #
 # if save_sigma_mu == True:
 #     if not os.path.exists(name+'/Eval_Results/saved_array'):

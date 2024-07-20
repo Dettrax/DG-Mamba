@@ -251,12 +251,13 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
     print('Total parameters:', sum(p.numel() for p in model.parameters()))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5, min_lr=1e-5)
+
     val_losses = []
     train_loss = []
     test_loss = []
     best_MAP = 0
-    for e in tqdm(range(2)):
+    best_model = None
+    for e in tqdm(range(100)):
         model.train()
         loss_step = []
         for i in range(lookback, 63):
@@ -307,35 +308,35 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
             val_loss_value /= val_samples
         test_loss.append(val_loss_value)
         # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} TEst Loss: {val_loss_value}")
-        # scheduler.step(val_loss_value)
-        # if e %4 ==0:
-        #     mu_timestamp = []
-        #     sigma_timestamp = []
-        #     with torch.no_grad():
-        #         model.eval()
-        #         for i in range(lookback, 90):
-        #             x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-        #             x = x.clone().detach().requires_grad_(True).to(device)
-        #             edge_index = edge_index.clone().detach().to(device)
-        #             _, mu, sigma = model(x, edge_index)
-        #             mu_timestamp.append(mu.cpu().detach().numpy())
-        #             sigma_timestamp.append(sigma.cpu().detach().numpy())
-        #
-        #     # Save mu and sigma matrices
-        #     name = 'Results/RealityMining'
-        #     save_sigma_mu = True
-        #     sigma_L_arr = []
-        #     mu_L_arr = []
-        #     if save_sigma_mu == True:
-        #         sigma_L_arr.append(sigma_timestamp)
-        #         mu_L_arr.append(mu_timestamp)
-        #     curr_MAP ,_ = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
-        #     if curr_MAP > best_MAP:
-        #         best_MAP = curr_MAP
-        #         torch.save(model.state_dict(), 'best_model.pth')
-        #         print("Best MAP: ",e, best_MAP,sep=" ")
+        if e %10 ==0:
+            mu_timestamp = []
+            sigma_timestamp = []
+            with torch.no_grad():
+                model.eval()
+                for i in range(lookback, 90):
+                    x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+                    x = x.clone().detach().requires_grad_(True).to(device)
+                    edge_index = edge_index.clone().detach().to(device)
+                    _, mu, sigma = model(x, edge_index)
+                    mu_timestamp.append(mu.cpu().detach().numpy())
+                    sigma_timestamp.append(sigma.cpu().detach().numpy())
 
-    return model , val_losses , train_loss , test_loss
+            # Save mu and sigma matrices
+            name = 'Results/RealityMining'
+            save_sigma_mu = True
+            sigma_L_arr = []
+            mu_L_arr = []
+            if save_sigma_mu == True:
+                sigma_L_arr.append(sigma_timestamp)
+                mu_L_arr.append(mu_timestamp)
+            curr_MAP ,_ = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
+            if curr_MAP > best_MAP:
+                best_MAP = curr_MAP
+                best_model = model
+                # torch.save(model.state_dict(), 'best_model.pth')
+                print("Best MAP: ",e, best_MAP,sep=" ")
+
+    return best_model , val_losses , train_loss , test_loss
 
 
 # Train/Val/Test split
@@ -359,7 +360,7 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
 
 lookback = 5
 walk = 16
-model , val_losses , loss_step , test_loss = optimise_mamba(lookback=lookback,dim_in=24,d_conv=6,d_state=8,dropout=0.40,lr=0.00045,weight_decay=0.00037,walk_length=walk)
+model , val_losses , loss_step , test_loss = optimise_mamba(lookback=lookback,dim_in=76,d_conv=9,d_state=6,dropout=0.4285,lr=0.000120,weight_decay=2.4530158734036414e-05,walk_length=walk)
 
 # model , val_losses , loss_step = optimise_mamba(lookback=lookback,window_size=96,stride=1,channel=8,pe_dim=6,num_layers=2,d_conv=4,d_state=4,dropout=0.4,lr=0.002,weight_decay=0.004,walk_length=walk)
 
@@ -379,7 +380,7 @@ print("Average Training Loss: ", np.mean(loss_step))
 
 dataset = RMDataset(data, lookback, walk)
 #read the best_model.pt
-model.load_state_dict(torch.load('best_model.pth'))
+# model.load_state_dict(torch.load('best_model.pth'))
 mu_timestamp = []
 sigma_timestamp = []
 with torch.no_grad():
@@ -405,22 +406,6 @@ MAPS = []
 MRR = []
 for i in tqdm(range(5)):
     curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
-    MAPS.append(curr_MAP)
-    MRR.append(curr_MRR)
-#print mean and std of map and mrr
-print("Mean MAP: ", np.mean(MAPS))
-print("Mean MRR: ", np.mean(MRR))
-print("Std MAP: ", np.std(MAPS))
-print("Std MRR: ", np.std(MRR))
-print("Time taken: ", time.time() - start)
-
-from opt_eval import eff_MAP_avg
-
-start = time.time()
-MAPS = []
-MRR = []
-for i in tqdm(range(15)):
-    curr_MAP, curr_MRR = eff_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
     MAPS.append(curr_MAP)
     MRR.append(curr_MRR)
 #print mean and std of map and mrr

@@ -1,24 +1,42 @@
-
+from scipy.sparse import csr_matrix
+import tarfile
+import json
+import torch
+import numpy as np
+import scipy.sparse as sp
+import itertools
+import math
+from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.linear_model import LogisticRegressionCV
+from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
+from sklearn.preprocessing import normalize
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from utils import *
 from models import *
-
+from scipy import sparse
 import random
-
+from os import listdir
+from os.path import isfile, join
+import sklearn.metrics as metrics
+import copy
+from sklearn.metrics import precision_recall_curve
 from scipy.sparse import coo_matrix
-
+from matplotlib import pyplot as plt
+import pickle
 import time
 import warnings
-
+import argparse
+import yaml
 import os
 import logging
 
 warnings.filterwarnings('ignore')
 import pandas as pd
-
-import json
+from copy import deepcopy
 
 # In[11]:
-
 
 # Read parameters from json file
 f = open("config.json")
@@ -54,14 +72,14 @@ def init_logging_handler(exp_name):
     logger.setLevel(logging.DEBUG)
 
 
-name = 'Results/RealityMining'
+name = 'Results/UCI'
 # init_logging_handler(name)
 # logging.debug(str(config))
 
 
 def check_if_gpu():
     if torch.cuda.is_available():
-        device = 'cuda:0'
+        device = 'cuda'
     else:
         device = 'cpu'
     return device
@@ -105,11 +123,7 @@ def load_data_from_tar(file, tar_archive, replace_unknow=False, starting_line=1,
 
     lines = lines.splitlines()
 
-    #     data = []
-    #     for row in lines[starting_line:]:
-    #         for r in row.split(sep):
-
-    data = [[type_fn(r) for r in row.split()] for row in lines[starting_line:]]
+    data = [[type_fn(r) for r in row.split(sep)] for row in lines[starting_line:]]
     data = tensor_const(data)
     # print (file,'data size', data.size())
     return data
@@ -119,7 +133,7 @@ def is_compatible(filename):
     return any(filename.endswith(extension) for extension in ['.txt'])
 
 
-class dataset_mit(torch.utils.data.Dataset):
+class dataset_UCI(torch.utils.data.Dataset):
     def __init__(self, root_dir, train=True):
 
         self.root_dir = root_dir
@@ -128,10 +142,10 @@ class dataset_mit(torch.utils.data.Dataset):
         self.X_Sparse_arr = []
         count = 0
         max_size = 0
-        tar_file = self.root_dir + '/datasets/download.tsv.mit.tar.bz2'
+        tar_file = self.root_dir + '/datasets/download.tsv.opsahl-ucsocial.tar.bz2'
         tar_archive = tarfile.open(tar_file, 'r:bz2')
 
-        data = load_data_from_tar('mit/out.mit',
+        data = load_data_from_tar('opsahl-ucsocial/out.opsahl-ucsocial',
                                   tar_archive,
                                   starting_line=2,
                                   sep=' ')
@@ -149,15 +163,15 @@ class dataset_mit(torch.utils.data.Dataset):
         data[:, [cols.source, cols.target]] -= 1
 
         # add edges in the other direction (simmetric)
-        #         data = torch.cat([data,
-        #                            data[:,[cols.target,
-        #                            cols.source,
-        #                            cols.weight,
-        #                            cols.time]]],
-        #                    dim=0)
+        data = torch.cat([data,
+                          data[:, [cols.target,
+                                   cols.source,
+                                   cols.weight,
+                                   cols.time]]],
+                         dim=0)
 
         data[:, cols.time] = aggregate_by_time(data[:, cols.time],
-                                               222400)
+                                               190080)
 
         ids = data[:, cols.source] * num_nodes + data[:, cols.target]
         num_non_existing = float(num_nodes ** 2 - ids.unique().size(0))
@@ -214,8 +228,8 @@ class dataset_mit(torch.utils.data.Dataset):
 
 # In[4]:
 
-#
-# data = dataset_mit('..')
+
+# data = dataset_UCI('../')
 
 
 # In[3]:
@@ -302,17 +316,98 @@ import pickle
 
 # with open('test_UCI_config-1/Eval_Results/saved_array/mu_as','rb') as f: mu_arr = pickle.load(f)
 # with open('test_UCI_config-1/Eval_Results/saved_array/sigma_as','rb') as f: sigma_arr = pickle.load(f)
-name_loaded = 'Results/RealityMining'
-# with open(name_loaded + '/Eval_Results/saved_array/mu_as', 'rb') as f: mu_arr = pickle.load(f)
-# with open(name_loaded + '/Eval_Results/saved_array/sigma_as', 'rb') as f: sigma_arr = pickle.load(f)
+name_loaded = 'Results/UCI'
+def unison_shuffled_copies(a, b, seed):
+    assert len(a) == len(b)
+    np.random.seed(seed)
+    p = np.random.permutation(len(a))
+    return a[p], b[p]
 
-def get_MAP_avg(mu_arr,lookback,data):
+
+def find_and_sample_zero_entries(sparse_matrix, num_samples=None):
+    # Convert sparse matrix to dense format
+    dense_matrix = sparse_matrix.toarray()
+
+    # Create a boolean array: True where elements are zero
+    zero_mask = dense_matrix == 0
+
+    # Get the indices of zero elements
+    zero_indices = np.argwhere(zero_mask)
+
+    # Check if sampling is requested
+    if num_samples is not None and num_samples > 0:
+        # Ensure that there are enough zero entries to sample from
+        if num_samples > len(zero_indices):
+            raise ValueError("Requested more samples than available zeros.")
+        # Sample indices randomly without replacement
+        sampled_indices = zero_indices[np.random.choice(len(zero_indices), num_samples, replace=False)]
+        return sampled_indices
+    return zero_indices
+
+def get_inf(data, mu_64, sigma_64, lookback,mult):
+    return_dict = {}
+    #     for i in range (1, len(val_timestep) - 30):
+    count = 0
+    for ctr in range(lookback + 1, 63):
+
+        A_node = data[ctr][0].shape[0]
+        A = data[ctr][0]
+
+        if count > 0:
+            if A_node > A_prev_node:
+                A = A[:A_prev_node, :A_prev_node]
+
+            if ctr < 63 and ctr > 2:
+
+                ones_edj = A.nnz
+                if A.shape[0] * mult <= (A.shape[0] - 1) * (A.shape[0] - 1):
+                    zeroes_edj = A.shape[0] * mult
+                else:
+                    zeroes_edj = (A.shape[0] - 1) * (A.shape[0] - 1) - A.nnz
+
+                tot = ones_edj + zeroes_edj
+
+                # Ensure A is in COO format
+                A_coo = A.tocoo() if not isinstance(A, coo_matrix) else A
+
+                # Get the pairs directly from the COO format properties
+                val_ones = list(zip(A_coo.row, A_coo.col))
+
+                val_ones = list(map(list, val_ones))
+
+                val_zeros = find_and_sample_zero_entries(A, zeroes_edj)
+
+                val_edges = np.row_stack((val_ones, val_zeros))
+
+                val_ground_truth = A[val_edges[:, 0], val_edges[:, 1]].A1
+
+                a, b = unison_shuffled_copies(val_edges, val_ground_truth, count)
+
+                if ctr >= 0:
+
+                    a_embed = np.array(mu_64[ctr - lookback])[a.astype(int)]
+
+                    a_embed_stacked = np.vstack(a_embed)  # This stacks all [0] and [1] vertically
+
+                    # Since we know every pair [0] and [1] are stacked sequentially, we can reshape:
+                    n_features = a_embed.shape[2]  # Number of features in each sub-array
+                    inp_clf_temp = a_embed_stacked.reshape(tot, 2 * n_features)
+
+                    inp_clf = torch.tensor(inp_clf_temp)
+
+                    inp_clf = inp_clf.to(device)
+                    return_dict[ctr] = [inp_clf,b]
+        A_prev_node = data[ctr][0].shape[0]
+        count = count + 1
+    return return_dict
+
+def get_MAP_avg(mu_arr,sigma_arr,lookback,data):
     MAP_l = []
     MRR_l = []
     for l_num in range(len(L_list)):
 
         mu_64 = mu_arr[l_num]
-
+        sigma_64 = sigma_arr[l_num]
 
 
         # In[7]:
@@ -323,6 +418,23 @@ def get_MAP_avg(mu_arr,lookback,data):
             p = np.random.permutation(len(a))
             return a[p], b[p]
 
+
+        #     class Classifier(torch.nn.Module):
+        #         def __init__(self):
+        #             super(Classifier,self).__init__()
+        #             activation = torch.nn.ReLU()
+
+        #             self.mlp = torch.nn.Sequential(torch.nn.Linear(in_features = np.array(mu_64[0]).shape[1],
+        #                                                            out_features = np.array(mu_64[0]).shape[1]//2,
+        #                                            activation,
+        #                                            torch.nn.Linear(in_features = np.array(mu_64[0]).shape[1]//2,
+        #                                                            out_features = 1))
+
+        #         def forward(self,x):
+
+        #             return self.mlp(x)
+
+        #     print(np.array(mu_64[0]).shape[1])
 
         class Classifier(torch.nn.Module):
             def __init__(self):
@@ -357,57 +469,23 @@ def get_MAP_avg(mu_arr,lookback,data):
         mult = 10
         mult_test = 50
         num_epochs = 50
+        mainloss_list = []
+        count = 1
+        return_dict = get_inf(data, mu_64, sigma_64, lookback, mult)
         for epoch in range(num_epochs):
             #     for i in range (1, len(val_timestep) - 30):
-            count = 0
+            timestamploss_list = []
             for ctr in range(lookback + 1, 63):
-
-                A_node = data[ctr][0].shape[0]
-                A = data[ctr][0]
-
                 if count > 0:
-                    if A_node > A_prev_node:
-                        A = A[:A_prev_node, :A_prev_node]
-
-                    if ctr < 63 and ctr > 0:
-
-
-                        ones_edj = A.nnz
-                        if A.shape[0] * mult <= (A.shape[0] - 1) * (A.shape[0] - 1):
-                            zeroes_edj = A.shape[0] * mult
-                        else:
-                            zeroes_edj = (A.shape[0] - 1) * (A.shape[0] - 1) - A.nnz
-
-                        tot = ones_edj + zeroes_edj
-
-                        val_ones = list(set(zip(*A.nonzero())))
-                        val_ones = random.sample(val_ones, ones_edj)
-                        val_ones = [list(ele) for ele in val_ones]
-                        val_zeros = sample_zero_n(A, zeroes_edj)
-                        val_zeros = [list(ele) for ele in val_zeros]
-                        val_edges = np.row_stack((val_ones, val_zeros))
-
-                        val_ground_truth = A[val_edges[:, 0], val_edges[:, 1]].A1
-
-                        a, b = unison_shuffled_copies(val_edges, val_ground_truth, count)
+                    if ctr < 63 and ctr > 2:
 
                         if ctr > 0:
-                            #                             print(len(mu_64))
-                            #                             print(mu_64[0].shape)
-                            #                             print(np.array(mu_64[ctr-1]))
-                            a_embed = np.array(mu_64[ctr - (lookback + 1)])[a.astype(int)]
-
-
                             classify.train()
-
-                            inp_clf = []
-                            for d_id in range(tot):
-                                inp_clf.append(np.concatenate((a_embed[d_id][0], a_embed[d_id][1]), axis=0))
-
-                            inp_clf = torch.tensor(np.asarray(inp_clf))
-
-                            inp_clf = inp_clf.to(device)
+                            decompose = return_dict[ctr]
+                            inp_clf = decompose[0]
+                            b = decompose[1]
                             out = classify(inp_clf).squeeze()
+
 
                             weight = torch.tensor([0.1, 0.9]).to(device)
                             #                         pos_weight = torch.ones([1])*9  # All weights are equal to 1
@@ -427,18 +505,17 @@ def get_MAP_avg(mu_arr,lookback,data):
                             optim.step()
 
                             # MRR = get_MRR(out.cpu(), label.cpu(), np.transpose(a))
-
+                            #
                             # logging.debug('L:{}, Epoch: {}, Timestep: {}, Loss: {}, MAP: {}, MRR: {}'.format(
                             #     np.array(mu_64[0]).shape[1], epoch, ctr, l.item(), get_MAP_e(out.cpu(), label.cpu(), None),
                             #     MRR))
+                            timestamploss_list.append(l.item())
 
-                A_prev_node = data[ctr][0].shape[0]
                 count = count + 1
-
+            mainloss_list.append(np.mean(timestamploss_list))
         # In[ ]:
 
         #     time_list = [73, 75, 77, 79, 81, 83, 85, 87]
-
         num_epochs = 1
         MAP_time = []
         MRR_time = []
@@ -450,7 +527,7 @@ def get_MAP_avg(mu_arr,lookback,data):
             #     for i in range (70, len(val_timestep)):
             count = 0
 
-            for ctr in range(72, 90):
+            for ctr in range(62, 71):
 
                 A_node = data[ctr][0].shape[0]
                 A = data[ctr][0]
@@ -459,9 +536,9 @@ def get_MAP_avg(mu_arr,lookback,data):
                     if A_node > A_prev_node:
                         A = A[:A_prev_node, :A_prev_node]
 
-                    if ctr >= 72:
+                    if ctr >= 0:
                         # logging.debug('Testing')
-
+                        # logging.debug(ctr)
 
                         ones_edj = A.nnz
                         if A.shape[0] * mult_test <= (A.shape[0] - 1) * (A.shape[0] - 1):
@@ -485,7 +562,7 @@ def get_MAP_avg(mu_arr,lookback,data):
                         if ctr > 0:
 
                             a_embed = np.array(mu_64[ctr - (lookback + 1)])[a.astype(int)]
-
+                            a_embed_sig = np.array(sigma_64[ctr - (lookback + 1)])[a.astype(int)]
 
                             classify.eval()
 
@@ -536,9 +613,6 @@ def get_MAP_avg(mu_arr,lookback,data):
         MAP_l.append(MAP_time)
         MRR_l.append(MRR_time)
         return np.asarray(get_MAP_avg).mean() , np.asarray(get_MRR_avg).mean()
-
-
-
 
 
 

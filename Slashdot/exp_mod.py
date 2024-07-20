@@ -1,24 +1,42 @@
+from scipy.sparse import csr_matrix
+import tarfile
 
+import torch
+import numpy as np
+import scipy.sparse as sp
+import itertools
+import math
+from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.linear_model import LogisticRegressionCV
+from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
+from sklearn.preprocessing import normalize
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from utils import *
 from models import *
-
+from scipy import sparse
 import random
-
+from os import listdir
+from os.path import isfile, join
+import sklearn.metrics as metrics
+import copy
+from sklearn.metrics import precision_recall_curve
 from scipy.sparse import coo_matrix
-
+import matplotlib.pyplot as plt
+import pickle
 import time
 import warnings
-
+import argparse
+# import yaml
 import os
 import logging
 
 warnings.filterwarnings('ignore')
 import pandas as pd
-
+from copy import deepcopy
+import networkx
 import json
-
-# In[11]:
-
 
 # Read parameters from json file
 f = open("config.json")
@@ -54,20 +72,21 @@ def init_logging_handler(exp_name):
     logger.setLevel(logging.DEBUG)
 
 
-name = 'Results/RealityMining'
+name = 'Results/Slashdot'
 # init_logging_handler(name)
 # logging.debug(str(config))
 
 
 def check_if_gpu():
     if torch.cuda.is_available():
-        device = 'cuda:0'
+        device = 'cuda'
     else:
         device = 'cpu'
     return device
 
 
 device = check_if_gpu()
+# # device = 'cpu'
 # logging.debug('The code will be running on {}'.format(device))
 
 
@@ -128,48 +147,22 @@ class dataset_mit(torch.utils.data.Dataset):
         self.X_Sparse_arr = []
         count = 0
         max_size = 0
-        tar_file = self.root_dir + '/datasets/download.tsv.mit.tar.bz2'
-        tar_archive = tarfile.open(tar_file, 'r:bz2')
 
-        data = load_data_from_tar('mit/out.mit',
-                                  tar_archive,
-                                  starting_line=2,
-                                  sep=' ')
+        with open(self.root_dir + 'datasets/slashdot_monthly_dynamic.pkl', 'rb') as f:
+            data = pickle.load(f)
 
-        cols = Namespace({'source': 0,
-                          'target': 1,
-                          'weight': 2,
-                          'time': 3})
+        c = 0
+        source_arr = []
+        time_arr = []
+        target_arr = []
+        for network in data:
+            for i in data[network].edges:
+                time_arr.append(c)
+                source_arr.append(i[0])
+                target_arr.append(i[1])
+            c = c + 1
 
-        data = data.long()
-
-        num_nodes = int(data[:, [cols.source, cols.target]].max())
-
-        # first id should be 0 (they are already contiguous)
-        data[:, [cols.source, cols.target]] -= 1
-
-        # add edges in the other direction (simmetric)
-        #         data = torch.cat([data,
-        #                            data[:,[cols.target,
-        #                            cols.source,
-        #                            cols.weight,
-        #                            cols.time]]],
-        #                    dim=0)
-
-        data[:, cols.time] = aggregate_by_time(data[:, cols.time],
-                                               222400)
-
-        ids = data[:, cols.source] * num_nodes + data[:, cols.target]
-        num_non_existing = float(num_nodes ** 2 - ids.unique().size(0))
-
-        idx = data[:, [cols.source,
-                       cols.target,
-                       cols.time]]
-
-        max_time = data[:, cols.time].max()
-        min_time = data[:, cols.time].min()
-
-        df = pd.DataFrame(idx.numpy())
+        df = pd.DataFrame({'Source': source_arr, 'Target': target_arr, 'time': time_arr})
         df.columns = ['source', 'target', 'time']
 
         for i in range(df['time'].max() + 1):
@@ -201,10 +194,22 @@ class dataset_mit(torch.utils.data.Dataset):
         else:
             arr_zero = np.zeros((arr.max() + 1, arr.max() + 1))
             new_max = arr.max() + 1
+
+        row_ind = []
+        col_ind = []
+        data = []
         for i in new_a:
-            arr_zero[int(i[0])][int(i[1])] = 1
-        arr_zero[range(len(arr_zero)), range(len(arr_zero))] = 0
-        A = csr_matrix(arr_zero)
+            row_ind.append(int(i[0]))
+            col_ind.append(int(i[1]))
+            data.append(1)
+            # arr_zero[int(i[0])-1][int(i[1])-1] = 1
+        # arr_zero[range(len(arr_zero)), range(len(arr_zero))] = 0
+        # A = csr_matrix(arr_zero)
+
+        data = np.array(data)
+        row_ind = np.array(row_ind) - 1
+        col_ind = np.array(col_ind) - 1
+        A = csr_matrix((data, (row_ind, col_ind)), shape=(new_max, new_max))
         X = A + sp.eye(A.shape[0])
         X_Sparse = sparse_feeder(X)
         X_Sparse = spy_sparse2torch_sparse(X_Sparse)
@@ -215,7 +220,7 @@ class dataset_mit(torch.utils.data.Dataset):
 # In[4]:
 
 #
-# data = dataset_mit('..')
+# data = dataset_mit('../')
 
 
 # In[3]:
@@ -302,9 +307,18 @@ import pickle
 
 # with open('test_UCI_config-1/Eval_Results/saved_array/mu_as','rb') as f: mu_arr = pickle.load(f)
 # with open('test_UCI_config-1/Eval_Results/saved_array/sigma_as','rb') as f: sigma_arr = pickle.load(f)
-name_loaded = 'Results/RealityMining'
+
+# name_loaded = 'Results/Slashdot'
 # with open(name_loaded + '/Eval_Results/saved_array/mu_as', 'rb') as f: mu_arr = pickle.load(f)
 # with open(name_loaded + '/Eval_Results/saved_array/sigma_as', 'rb') as f: sigma_arr = pickle.load(f)
+
+def unison_shuffled_copies(a, b, seed):
+    assert len(a) == len(b)
+    np.random.seed(seed)
+    p = np.random.permutation(len(a))
+    return a[p], b[p]
+
+
 def find_and_sample_zero_entries(sparse_matrix, num_samples=None):
     # Convert sparse matrix to dense format
     dense_matrix = sparse_matrix.toarray()
@@ -325,17 +339,11 @@ def find_and_sample_zero_entries(sparse_matrix, num_samples=None):
         return sampled_indices
     return zero_indices
 
-
-def unison_shuffled_copies(a, b, seed):
-    assert len(a) == len(b)
-    np.random.seed(seed)
-    p = np.random.permutation(len(a))
-    return a[p], b[p]
-
 def get_inf(data, mu_64, sigma_64, lookback,mult):
     return_dict = {}
+    #     for i in range (1, len(val_timestep) - 30):
     count = 0
-    for ctr in range(lookback + 1, 63):
+    for ctr in range(lookback, 9):
 
         A_node = data[ctr][0].shape[0]
         A = data[ctr][0]
@@ -344,7 +352,7 @@ def get_inf(data, mu_64, sigma_64, lookback,mult):
             if A_node > A_prev_node:
                 A = A[:A_prev_node, :A_prev_node]
 
-            if ctr < 63 and ctr > 0:
+            if ctr < 9 and ctr > 0:
 
                 ones_edj = A.nnz
                 if A.shape[0] * mult <= (A.shape[0] - 1) * (A.shape[0] - 1):
@@ -353,7 +361,6 @@ def get_inf(data, mu_64, sigma_64, lookback,mult):
                     zeroes_edj = (A.shape[0] - 1) * (A.shape[0] - 1) - A.nnz
 
                 tot = ones_edj + zeroes_edj
-
                 # Ensure A is in COO format
                 A_coo = A.tocoo() if not isinstance(A, coo_matrix) else A
 
@@ -370,10 +377,9 @@ def get_inf(data, mu_64, sigma_64, lookback,mult):
 
                 a, b = unison_shuffled_copies(val_edges, val_ground_truth, count)
 
-                if ctr > 0:
+                if ctr >= 0:
 
-                    a_embed = np.array(mu_64[ctr - (lookback + 1)])[a.astype(int)]
-
+                    a_embed = np.array(mu_64[ctr - lookback])[a.astype(int)]
 
                     a_embed_stacked = np.vstack(a_embed)  # This stacks all [0] and [1] vertically
 
@@ -385,12 +391,11 @@ def get_inf(data, mu_64, sigma_64, lookback,mult):
 
                     inp_clf = inp_clf.to(device)
                     return_dict[ctr] = [inp_clf,b]
-
-
         A_prev_node = data[ctr][0].shape[0]
         count = count + 1
     return return_dict
-def eff_MAP_avg(mu_arr,sigma_arr,lookback,data):
+
+def get_MAP_avg(mu_arr,sigma_arr,lookback,data,device):
     MAP_l = []
     MRR_l = []
     for l_num in range(len(L_list)):
@@ -400,8 +405,6 @@ def eff_MAP_avg(mu_arr,sigma_arr,lookback,data):
 
 
         # In[7]:
-
-
 
         class Classifier(torch.nn.Module):
             def __init__(self):
@@ -434,23 +437,17 @@ def eff_MAP_avg(mu_arr,sigma_arr,lookback,data):
 
         optim = torch.optim.Adam(classify.parameters(), lr=1e-3)
         mult = 10
-        mult_test = 50
+        mult_test = 40
         num_epochs = 50
         return_dict = get_inf(data, mu_64, sigma_64, lookback, mult)
         for epoch in range(num_epochs):
             #     for i in range (1, len(val_timestep) - 30):
-            count = 0
-            for ctr in range(lookback + 1, 63):
+            for ctr in range(lookback + 1, 9):
 
                 if count > 0:
-
-                    if ctr < 63 and ctr > 0:
-
-                        if ctr > 0:
-
-                            classify.train()
-                            decompose = return_dict[ctr]
-                            inp_clf , b = decompose[0],decompose[1]
+                    if ctr < 9 and ctr > 0:
+                            inp_clf, b = return_dict[ctr]
+                            inp_clf = inp_clf.to(device)
                             out = classify(inp_clf).squeeze()
 
                             weight = torch.tensor([0.1, 0.9]).to(device)
@@ -460,7 +457,7 @@ def eff_MAP_avg(mu_arr,sigma_arr,lookback,data):
 
                             weight_ = weight[label.data.view(-1).long()].view_as(label)
 
-                            l = loss(out, label)
+                            l = loss(out, label.float())
 
                             l = l * weight_
                             l = l.mean()
@@ -470,12 +467,18 @@ def eff_MAP_avg(mu_arr,sigma_arr,lookback,data):
                             l.backward()
                             optim.step()
 
+                            # MRR = get_MRR(out.cpu(), label.cpu(), np.transpose(a))
+                            #
+                            # logging.debug('L:{}, Epoch: {}, Timestep: {}, Loss: {}, MAP: {}, MRR: {}'.format(
+                            #     np.array(mu_64[0]).shape[1], epoch, ctr, l.item(), get_MAP_e(out.cpu(), label.cpu(), None),
+                            #     MRR))
+
+
                 count = count + 1
 
         # In[ ]:
 
         #     time_list = [73, 75, 77, 79, 81, 83, 85, 87]
-
         num_epochs = 1
         MAP_time = []
         MRR_time = []
@@ -487,7 +490,7 @@ def eff_MAP_avg(mu_arr,sigma_arr,lookback,data):
             #     for i in range (70, len(val_timestep)):
             count = 0
 
-            for ctr in range(72, 90):
+            for ctr in range(9, 11):
 
                 A_node = data[ctr][0].shape[0]
                 A = data[ctr][0]
@@ -496,9 +499,9 @@ def eff_MAP_avg(mu_arr,sigma_arr,lookback,data):
                     if A_node > A_prev_node:
                         A = A[:A_prev_node, :A_prev_node]
 
-                    if ctr >= 72:
+                    if ctr >= 9:
                         # logging.debug('Testing')
-
+                        # logging.debug(ctr)
 
                         ones_edj = A.nnz
                         if A.shape[0] * mult_test <= (A.shape[0] - 1) * (A.shape[0] - 1):
@@ -508,16 +511,11 @@ def eff_MAP_avg(mu_arr,sigma_arr,lookback,data):
 
                         tot = ones_edj + zeroes_edj
 
-                        # Ensure A is in COO format
-                        A_coo = A.tocoo() if not isinstance(A, coo_matrix) else A
-
-                        # Get the pairs directly from the COO format properties
-                        val_ones = list(zip(A_coo.row, A_coo.col))
-
-                        val_ones = list(map(list, val_ones))
-
-                        val_zeros = find_and_sample_zero_entries(A, zeroes_edj)
-
+                        val_ones = list(set(zip(*A.nonzero())))
+                        val_ones = random.sample(val_ones, ones_edj)
+                        val_ones = [list(ele) for ele in val_ones]
+                        val_zeros = sample_zero_n(A, zeroes_edj)
+                        val_zeros = [list(ele) for ele in val_zeros]
                         val_edges = np.row_stack((val_ones, val_zeros))
 
                         val_ground_truth = A[val_edges[:, 0], val_edges[:, 1]].A1
@@ -548,7 +546,7 @@ def eff_MAP_avg(mu_arr,sigma_arr,lookback,data):
 
                             weight_ = weight[label.data.view(-1).long()].view_as(label)
 
-                            l = loss(out, label)
+                            l = loss(out, label.float())
 
                             l = l * weight_
                             l = l.mean()
@@ -578,3 +576,6 @@ def eff_MAP_avg(mu_arr,sigma_arr,lookback,data):
         MAP_l.append(MAP_time)
         MRR_l.append(MRR_time)
         return np.asarray(get_MAP_avg).mean() , np.asarray(get_MRR_avg).mean()
+
+
+

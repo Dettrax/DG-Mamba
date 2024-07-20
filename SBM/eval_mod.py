@@ -1,3 +1,5 @@
+import time
+start_t = time.time()
 from scipy.sparse import csr_matrix
 import numpy as np
 import scipy.sparse as sp
@@ -308,6 +310,3 @@ def get_MAP_avg(mu_arr,sigma_arr,lookback,data):
 
 
         return np.asarray(get_MAP_avg).mean() , np.asarray(get_MRR_avg).mean()
-
-
-

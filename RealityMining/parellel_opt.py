@@ -19,7 +19,7 @@ from ray import tune
 from ray import train, tune
 from ray.tune.search.optuna import OptunaSearch
 
-from eval_mod import get_MAP_avg
+from exp_mod import get_MAP_avg
 from torch.utils.data import Dataset, DataLoader
 from torch_geometric.utils import dense_to_sparse
 from torch_geometric.data import Data
@@ -315,7 +315,7 @@ def objective(config):  # ①
 
 
 ray.init(  runtime_env={
-            "working_dir": "/home/dettrax/PycharmProjects/TransformerG2G/RealityMining/",
+            "working_dir": str(os.getcwd()),
         })  # Initialize Ray
 
 
@@ -334,7 +334,7 @@ algo = OptunaSearch(
 tuner = tune.Tuner(  # ③
     tune.with_resources(
         tune.with_parameters(objective),
-        resources={"gpu": 1/16}
+        resources={"gpu": 1}
     ),
     tune_config=tune.TuneConfig(
         metric="MAP",

@@ -1,4 +1,5 @@
-
+import time
+start_t = time.time()
 from scipy.sparse import csr_matrix
 import numpy as np
 import scipy.sparse as sp
@@ -91,11 +92,11 @@ def find_and_sample_zero_entries(sparse_matrix, num_samples=None):
         return sampled_indices
     return zero_indices
 
-def get_inf(data, mu_64, sigma_64, lookback):
+def get_inf(data, mu_64, sigma_64, lookback,mult):
     return_dict = {}
     #     for i in range (1, len(val_timestep) - 30):
     count = 0
-    for ctr in range(lookback, 35):
+    for ctr in range(lookback + 1, 63):
 
         A_node = data[ctr][0].shape[0]
         A = data[ctr][0]
@@ -104,10 +105,14 @@ def get_inf(data, mu_64, sigma_64, lookback):
             if A_node > A_prev_node:
                 A = A[:A_prev_node, :A_prev_node]
 
-            if ctr < 35:
+            if ctr < 63 and ctr > 0:
 
                 ones_edj = A.nnz
-                zeroes_edj = A.shape[0] * 100
+                if A.shape[0] * mult <= (A.shape[0] - 1) * (A.shape[0] - 1):
+                    zeroes_edj = A.shape[0] * mult
+                else:
+                    zeroes_edj = (A.shape[0] - 1) * (A.shape[0] - 1) - A.nnz
+
                 tot = ones_edj + zeroes_edj
 
                 # Ensure A is in COO format
@@ -177,17 +182,18 @@ def get_MAP_avg(mu_arr,sigma_arr,lookback,data):
         loss = torch.nn.BCEWithLogitsLoss(reduce=False)
 
         optim = torch.optim.Adam(classify.parameters(), lr=1e-3)
-
+        mult = 10
+        mult_test = 50
         num_epochs = 50
-        return_dict = get_inf(data, mu_64, sigma_64, lookback)
+        return_dict = get_inf(data, mu_64, sigma_64, lookback,mult)
         for epoch in range(num_epochs):
             #     for i in range (1, len(val_timestep) - 30):
             count = 0
-            for ctr in range(lookback, 35):
+            for ctr in range(lookback + 1, 63):
 
                 if count > 0:
 
-                    if ctr < 35:
+                    if ctr < 63 and ctr > 0:
 
                         if ctr >= 0:
                             classify.train()
@@ -223,23 +229,29 @@ def get_MAP_avg(mu_arr,sigma_arr,lookback,data):
         for epoch in range(num_epochs):
             get_MAP_avg = []
             get_MRR_avg = []
+
             #     for i in range (70, len(val_timestep)):
             count = 0
-            for ctr in range(35,40):
+
+            for ctr in range(63, 72):
 
                 A_node = data[ctr][0].shape[0]
                 A = data[ctr][0]
 
-                if count >= 0:
+                if count > 0:
                     if A_node > A_prev_node:
                         A = A[:A_prev_node, :A_prev_node]
 
                     if ctr >= 0:
                         # logging.debug('Testing')
-                        # logging.debug(ctr)
+
 
                         ones_edj = A.nnz
-                        zeroes_edj = A.shape[0] * 100
+                        if A.shape[0] * mult_test <= (A.shape[0] - 1) * (A.shape[0] - 1):
+                            zeroes_edj = A.shape[0] * mult_test
+                        else:
+                            zeroes_edj = (A.shape[0] - 1) * (A.shape[0] - 1) - A.nnz
+
                         tot = ones_edj + zeroes_edj
 
                         val_ones = list(set(zip(*A.nonzero())))
@@ -255,8 +267,8 @@ def get_MAP_avg(mu_arr,sigma_arr,lookback,data):
 
                         if ctr > 0:
 
-                            a_embed = np.array(mu_64[ctr - lookback])[a.astype(int)]
-                            a_embed_sig = np.array(sigma_64[ctr - lookback])[a.astype(int)]
+                            a_embed = np.array(mu_64[ctr - (lookback + 1)])[a.astype(int)]
+                            a_embed_sig = np.array(sigma_64[ctr - (lookback + 1)])[a.astype(int)]
 
                             classify.eval()
 
@@ -270,9 +282,10 @@ def get_MAP_avg(mu_arr,sigma_arr,lookback,data):
                             with torch.no_grad():
                                 out = classify(inp_clf).squeeze()
 
-                            label = torch.tensor(np.asarray(b)).to(device)
-
                             weight = torch.tensor([0.1, 0.9]).to(device)
+                            #                         pos_weight = torch.ones([1])*9  # All weights are equal to 1
+
+                            label = torch.tensor(np.asarray(b)).to(device)
 
                             weight_ = weight[label.data.view(-1).long()].view_as(label)
 
@@ -288,13 +301,13 @@ def get_MAP_avg(mu_arr,sigma_arr,lookback,data):
 
                             get_MRR_avg.append(MRR)
 
-                            '''try:
+                            try:
                                 if ctr == time_list[time_ctr]:
                                     MAP_time.append(MAP_val)
                                     MRR_time.append(MRR)
-                                    time_ctr = time_ctr+1
+                                    time_ctr = time_ctr + 1
                             except:
-                                pass'''
+                                pass
 
                             # logging.debug(
                             #     'Epoch: {}, Timestep: {}, Loss: {}, MAP: {}, MRR: {}, Running Mean MAP: {}, Running Mean MRR: {}'.format(
@@ -303,9 +316,6 @@ def get_MAP_avg(mu_arr,sigma_arr,lookback,data):
 
                 A_prev_node = data[ctr][0].shape[0]
                 count = count + 1
-
         MAP_l.append(MAP_time)
         MRR_l.append(MRR_time)
-
-
         return np.asarray(get_MAP_avg).mean() , np.asarray(get_MRR_avg).mean()

@@ -2,9 +2,8 @@
 # We have used some of the functionalities from Xu, M., Singh, A.V. &
 # Karniadakis G.K. "DynG2G: An efficient Stochastic Graph Embedding
 # Method for Temporal Graphs".
-
+import torch_geometric.transforms as T
 import os
-
 try :
     os.chdir("RealityMining")
 except:
@@ -13,11 +12,11 @@ from models import *
 from utils import *
 import pickle
 import json
-from torch_geometric.nn import GCNConv
+from eval_mod import get_MAP_avg
 from torch.utils.data import Dataset, DataLoader
 from torch_geometric.utils import dense_to_sparse
 from torch_geometric.data import Data
-from torch_geometric.utils import add_self_loops, degree
+
 import numpy as np
 from sklearn.metrics import precision_recall_curve
 from sklearn.metrics import auc, precision_recall_curve
@@ -29,7 +28,7 @@ import itertools
 
 from torch.nn import ELU,Dropout
 
-from mamba import Mamba, MambaConfig
+from mamba_ssm import Mamba
 from tqdm import tqdm
 
 
@@ -85,8 +84,7 @@ config = json.load(f)
 lookback = config["lookback"]
 
 # Check GPU availability
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(device)
 
 
@@ -179,128 +177,119 @@ class RMDataset(Dataset):
 #     return np.mean(l)
 
 
-def Energy_KL(mu, sigma, pairs, L):
-    ij_mu = mu[pairs]
-    ij_sigma = sigma[pairs]
-    sigma_ratio = ij_sigma[:, 1] / (ij_sigma[:, 0] + 1e-14)
-    trace_fac = torch.sum(sigma_ratio, 1)
-    log_det = torch.sum(torch.log(sigma_ratio + 1e-14), 1)
-    mu_diff_sq = torch.sum(torch.square(ij_mu[:, 0] - ij_mu[:, 1]) / (ij_sigma[:, 0] + 1e-14), 1)
-    return 0.5 * (trace_fac + mu_diff_sq - L - log_det)
+# def Energy_KL(mu, sigma, pairs, L):
+#     ij_mu = mu[pairs]
+#     ij_sigma = sigma[pairs]
+#
+#     sigma_ratio = ij_sigma[:, 1] / (ij_sigma[:, 0] + 1e-14)
+#     trace_fac = torch.sum(sigma_ratio, 1)
+#     log_det = torch.sum(torch.log(sigma_ratio + 1e-14), 1)
+#     mu_diff_sq = torch.sum(torch.square(ij_mu[:, 0] - ij_mu[:, 1]) / (ij_sigma[:, 0] + 1e-14), 1)
+#     return 0.5 * (trace_fac + mu_diff_sq - L - log_det)
+#
+#
+#
+# def build_loss(triplets, scale_terms, mu, sigma, L, scale):
+#     hop_pos = torch.stack([torch.tensor(triplets[:, 0]), torch.tensor(triplets[:, 1])], 1).type(torch.int64)
+#     hop_neg = torch.stack([torch.tensor(triplets[:, 0]), torch.tensor(triplets[:, 2])], 1).type(torch.int64)
+#     eng_pos = Energy_KL(mu, sigma, hop_pos, L)
+#     eng_neg = Energy_KL(mu, sigma, hop_neg, L)
+#     energy = torch.square(eng_pos) + torch.exp(-eng_neg)
+#     if scale:
+#         loss = torch.mean(energy * torch.Tensor(scale_terms).cpu())
+#     else:
+#         loss = torch.mean(energy)
+#     return loss
 
+def reduce(a,b):
+    return 1/(torch.mean(abs(a-b)**2)+1e-14)
 
-# Define loss function
-def build_loss(triplets, scale_terms, mu, sigma, L, scale):
+mse_loss = nn.MSELoss()
+
+def build_loss(triplets,mu):
     hop_pos = torch.stack([torch.tensor(triplets[:, 0]), torch.tensor(triplets[:, 1])], 1).type(torch.int64)
     hop_neg = torch.stack([torch.tensor(triplets[:, 0]), torch.tensor(triplets[:, 2])], 1).type(torch.int64)
-    eng_pos = Energy_KL(mu, sigma, hop_pos, L)
-    eng_neg = Energy_KL(mu, sigma, hop_neg, L)
-    energy = torch.square(eng_pos) + torch.exp(-eng_neg)
-    if scale:
-        loss = torch.mean(energy * torch.Tensor(scale_terms).cpu())
-    else:
-        loss = torch.mean(energy)
-    return loss
+    # Get the positive embeddings
+    pos_embeddings = mu[hop_pos]  # Shape: (126, 2, 64)
+    # Separate the anchor and positive embeddings
+    anchor_pos_embeddings = pos_embeddings[:, 0, :]  # Shape: (126, 64)
+    positive_embeddings = pos_embeddings[:, 1, :]  # Shape: (126, 64)
+    # Get the negative embeddings
+    neg_embeddings = mu[hop_neg]  # Shape: (126, 2, 64)
+    # Separate the anchor and negative embeddings
+    anchor_neg_embeddings = neg_embeddings[:, 0, :]  # Shape: (126, 64)
+    negative_embeddings = neg_embeddings[:, 1, :]  # Shape: (126, 64)
+    # Calculate the MSE loss
+    mse_loss = F.mse_loss(anchor_pos_embeddings, positive_embeddings)
 
+    return mse_loss + reduce(anchor_neg_embeddings,negative_embeddings)
 
-from torch_geometric_temporal.nn.attention.stgcn import TemporalConv
+import torch
+import torch.nn.functional as F
+from torch_geometric.nn import MessagePassing
+from torch_geometric.utils import add_self_loops, degree
 
-
-class TemporalMessagePassingGNN(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, kernel_size,dropout=0.2):
-        super(TemporalMessagePassingGNN, self).__init__()
-        self.temporal_conv = TemporalConv(in_channels, hidden_channels, kernel_size)
-        self.gcn_conv = GCNConv(hidden_channels, out_channels)
-        self.dropout = Dropout(dropout)
-
-    def forward(self, x, edge_index):
-        # Transpose x to match the expected input shape for TemporalConv: (batch_size, input_time_steps, num_nodes, in_channels)
-        x = x.permute(1, 0, 2).unsqueeze(0)  # Shape: (1, lookback, num_nodes, in_channels)
-
-        # Apply temporal convolution
-        x = self.temporal_conv(x)  # Shape: (1, hidden_channels, num_nodes, lookback)
-
-        # Transpose x back to (lookback, num_nodes, hidden_channels)
-        x = x.squeeze(0).permute(2, 1, 0)  # Shape: (num_nodes, hidden_channels, lookback)
-
-        # Aggregate features over time (mean over the time dimension)
-        x = x.mean(dim=2)  # Shape: (num_nodes, hidden_channels)
-
-        # Apply graph convolution for message passing
-        x = self.gcn_conv(x, edge_index)  # Shape: (num_nodes, out_channels)
-        x = F.relu(x)
-        x = self.dropout(x)
-        x = x.unsqueeze(0)
-        return x
 
 class MambaG2G(torch.nn.Module):
-    def __init__(self, config: MambaConfig, dim_in, dim_out, dropout=0.2,layers=4):
+    def __init__(self, config, dim_in, dim_out, dropout=0.2):
         super(MambaG2G, self).__init__()
         self.D = dim_in
         self.elu = nn.ELU()
-        self.num_layers = layers
-        self.mamba = Mamba(config)
-        self.message_passing = TemporalMessagePassingGNN(dim_in, dim_in,dim_in,1,dropout)
-        self.enc_input_fc = nn.Linear(dim_in, dim_in)
+        self.mamba = Mamba(d_model=config['d_model'], d_state=config['d_state'], d_conv=config['d_conv'])
+
+        # self.enc_input_fc = nn.Linear(dim_in, dim_in)
         self.dropout = nn.Dropout(p=dropout)  # Add Dropout layer
-        self.out_fc = nn.Linear(config.d_model, self.D)  # Adjusted to match output dimension
+        self.out_fc = nn.Linear(config['d_model'], self.D)  # Adjusted to match output dimension
         self.sigma_fc = nn.Linear(self.D, dim_out)
         self.mu_fc = nn.Linear(self.D, dim_out)
 
     def forward(self, input,edge_index):
-        e = self.message_passing(input, edge_index)
-        e = torch.permute(e, (1, 0, 2))
-        e = self.mamba(e)
-
-        if self.num_layers > 1:
-            for i in range(self.num_layers - 1):
-                e = self.message_passing(e, edge_index)
-                e = torch.permute(e, (1, 0, 2))
-                e = self.mamba(e)
-
+        # e = self.enc_input_fc(input)
+        e = self.mamba(input)
         e = e.mean(dim=1)  # Average pooling to maintain the expected shape
         e = self.dropout(e)  # Apply dropout after average pooling
         x = torch.tanh(self.out_fc(e))
         x = self.elu(x)
         x = self.dropout(x)  # Apply dropout after the activation
         mu = self.mu_fc(x)
-        sigma = self.sigma_fc(x)
-        sigma = self.elu(sigma) + 1 + 1e-14
+        # sigma = self.sigma_fc(x)
+        # sigma = self.elu(sigma) + 1 + 1e-14
+        #sigmoid mu
 
-        return x, mu, sigma
+        return x, mu
 
-def optimise_mamba(lookback,mamba_layers,d_conv,d_state,dropout,lr,weight_decay,walk_length,message_passing_layers=4):
+
+def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_length):
 
 
     # Create dataset
     dataset = RMDataset(data, lookback,walk_length)
-    config = MambaConfig(
-        d_model=96,
-        n_layers=mamba_layers,
-        d_state=d_state,
-        d_conv=d_conv,
-        pscan=True
-    )
+    config = {
+        'd_model':96,
+        'd_state':d_state,
+        'd_conv':d_conv
+    }
 
-    model = MambaG2G(config, 96, 64, dropout=dropout,layers=message_passing_layers).to(device)
-
+    model = MambaG2G(config, dim_in, 64, dropout=dropout).to(device)
+    #print total model parameters
+    print('Total parameters:', sum(p.numel() for p in model.parameters()))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5, min_lr=1e-5)
+
     val_losses = []
     train_loss = []
     test_loss = []
-    for e in tqdm(range(50)):
+    best_MAP = 0
+    for e in tqdm(range(100)):
         model.train()
         loss_step = []
-        for i in range(lookback, 53):
+        for i in range(lookback, 63):
                 x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
                 optimizer.zero_grad()
-
                 x = x.clone().detach().requires_grad_(True).to(device)
                 edge_index = edge_index.clone().detach().to(device)
-                _,mu, sigma = model(x,edge_index)
-                loss = build_loss(triplet, scale, mu, sigma, 64, scale=False)
+                _,mu = model(x,edge_index)
+                loss = build_loss(triplet,mu)
 
                 loss_step.append(loss.cpu().detach().numpy())
                 loss.backward()
@@ -311,41 +300,66 @@ def optimise_mamba(lookback,mamba_layers,d_conv,d_state,dropout,lr,weight_decay,
 
         with torch.no_grad():
             model.eval()
-            for i in range(53, 62):
+            for i in range(63, 72):
                 x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
                 optimizer.zero_grad()
                 x = x.clone().detach().requires_grad_(False).to(device)
                 edge_index = edge_index.clone().detach().to(device)
-                _,mu, sigma = model(x,edge_index)
-                curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
+                _,mu = model(x,edge_index)
+                curr_val_loss = build_loss(triplet, mu).item()
                 val_loss_value += curr_val_loss
 
                 val_samples += 1
             val_loss_value /= val_samples
-        print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {val_loss_value}")
+        # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {val_loss_value}")
         val_losses.append(val_loss_value)
         train_loss.append(np.mean(np.stack(loss_step)))
-
         val_loss_value = 0.0
         val_samples = 0
         with torch.no_grad():
             model.eval()
-            for i in range(62, 90):
+            for i in range(72, 90):
                 x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
                 optimizer.zero_grad()
                 x = x.clone().detach().requires_grad_(False).to(device)
                 edge_index = edge_index.clone().detach().to(device)
-                _,mu, sigma = model(x,edge_index)
-                curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
+                _, mu = model(x, edge_index)
+                curr_val_loss = build_loss(triplet, mu).item()
                 val_loss_value += curr_val_loss
 
                 val_samples += 1
             val_loss_value /= val_samples
         test_loss.append(val_loss_value)
-        print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} TEst Loss: {val_loss_value}")
+        # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} TEst Loss: {val_loss_value}")
 
-        # scheduler.step(val_loss_value)
-    return model , val_losses , train_loss ,test_loss
+        if e %10 ==0:
+            mu_timestamp = []
+            sigma_timestamp = []
+            with torch.no_grad():
+                model.eval()
+                for i in range(lookback, 90):
+                    x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+                    x = x.clone().detach().requires_grad_(True).to(device)
+                    edge_index = edge_index.clone().detach().to(device)
+                    _, mu = model(x, edge_index)
+                    mu_timestamp.append(mu.cpu().detach().numpy())
+
+
+            # Save mu and sigma matrices
+            name = 'Results/RealityMining'
+            save_sigma_mu = True
+
+            mu_L_arr = []
+            if save_sigma_mu == True:
+
+                mu_L_arr.append(mu_timestamp)
+            curr_MAP ,_ = get_MAP_avg(mu_L_arr,lookback,data)
+            if curr_MAP > best_MAP:
+                best_MAP = curr_MAP
+                best_model = model
+                # torch.save(model.state_dict(), 'best_model.pth')
+                print("Best MAP: ",e, best_MAP,sep=" ")
+    return model , val_losses , train_loss , test_loss
 
 
 # Train/Val/Test split
@@ -367,58 +381,7 @@ def optimise_mamba(lookback,mamba_layers,d_conv,d_state,dropout,lr,weight_decay,
 #
 
 
-lookback = 2
+lookback = 5
 walk = 16
-model , val_losses , loss_step , test_loss = optimise_mamba(lookback=lookback,mamba_layers=2,d_conv=6,d_state=6,dropout=0.3,lr=0.00002,weight_decay=0.00090,walk_length=walk,message_passing_layers=3)
+model , val_losses , loss_step , test_loss = optimise_mamba(lookback=lookback,dim_in=76,d_conv=9,d_state=6,dropout=0.4285,lr=0.000120,weight_decay=2.4530158734036414e-05,walk_length=walk)
 
-# model , val_losses , loss_step = optimise_mamba(lookback=lookback,window_size=96,stride=1,channel=8,pe_dim=6,num_layers=2,d_conv=4,d_state=4,dropout=0.4,lr=0.002,weight_decay=0.004,walk_length=walk)
-
-print("Average Validation Loss: ", np.mean(val_losses))
-print("Average Training Loss: ", np.mean(loss_step))
-#pplot loss
-#add legend
-# y title and x title for loss vs epoch
-from matplotlib import pyplot as plt
-plt.semilogy(val_losses)
-plt.semilogy(loss_step)
-plt.semilogy(test_loss)
-plt.legend(['Validation Loss','Training Loss'])
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.show()
-
-
-dataset = RMDataset(data, lookback, walk)
-mu_timestamp = []
-sigma_timestamp=[]
-with torch.no_grad():
-    model.eval()
-    for i in range(lookback, 90):
-        x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-        x = x.clone().detach().requires_grad_(False).to(device)
-        edge_index = edge_index.clone().detach().to(device)
-        _, mu, sigma = model(x, edge_index)
-        mu_timestamp.append(mu.cpu().detach().numpy())
-        sigma_timestamp.append(sigma.cpu().detach().numpy())
-
-# Save mu and sigma matrices
-name = 'Results/RealityMining'
-save_sigma_mu = True
-sigma_L_arr = []
-mu_L_arr = []
-if save_sigma_mu == True:
-    sigma_L_arr.append(sigma_timestamp)
-    mu_L_arr.append(mu_timestamp)
-
-# if save_sigma_mu == True:
-#     if not os.path.exists(name + '/Eval_Results/saved_array'):
-#         os.makedirs(name + '/Eval_Results/saved_array')
-#     with open(name + '/Eval_Results/saved_array/sigma_as', 'wb') as f:
-#         pickle.dump(sigma_L_arr, f)
-#     with open(name + '/Eval_Results/saved_array/mu_as', 'wb') as f:
-#         pickle.dump(mu_L_arr, f)
-
-from eval_mod import get_MAP_avg
-
-
-print(get_MAP_avg(mu_L_arr,sigma_L_arr))

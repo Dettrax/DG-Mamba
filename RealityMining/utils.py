@@ -317,7 +317,7 @@ def get_row_MRR(probs,true_classes):
 
     existing_ranks = np.arange(1,
                                    true_classes.shape[0]+1,
-                                   dtype=np.float)[ordered_existing_mask]
+                                   dtype=np.float64)[ordered_existing_mask]
 
     MRR = (1/existing_ranks).sum()/existing_ranks.shape[0]
     return MRR
