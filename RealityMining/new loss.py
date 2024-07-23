@@ -187,8 +187,6 @@ class RMDataset(Dataset):
 #     mu_diff_sq = torch.sum(torch.square(ij_mu[:, 0] - ij_mu[:, 1]) / (ij_sigma[:, 0] + 1e-14), 1)
 #     return 0.5 * (trace_fac + mu_diff_sq - L - log_det)
 #
-#
-#
 # def build_loss(triplets, scale_terms, mu, sigma, L, scale):
 #     hop_pos = torch.stack([torch.tensor(triplets[:, 0]), torch.tensor(triplets[:, 1])], 1).type(torch.int64)
 #     hop_neg = torch.stack([torch.tensor(triplets[:, 0]), torch.tensor(triplets[:, 2])], 1).type(torch.int64)
@@ -204,7 +202,7 @@ class RMDataset(Dataset):
 def reduce(a,b):
     return 1/(torch.mean(abs(a-b)**2)+1e-14)
 
-mse_loss = nn.MSELoss()
+criterion = nn.TripletMarginLoss(margin=0.75)
 
 def build_loss(triplets,mu):
     hop_pos = torch.stack([torch.tensor(triplets[:, 0]), torch.tensor(triplets[:, 1])], 1).type(torch.int64)
@@ -220,9 +218,8 @@ def build_loss(triplets,mu):
     anchor_neg_embeddings = neg_embeddings[:, 0, :]  # Shape: (126, 64)
     negative_embeddings = neg_embeddings[:, 1, :]  # Shape: (126, 64)
     # Calculate the MSE loss
-    mse_loss = F.mse_loss(anchor_pos_embeddings, positive_embeddings)
-
-    return mse_loss + reduce(anchor_neg_embeddings,negative_embeddings)
+    loss = criterion(anchor_pos_embeddings, positive_embeddings, negative_embeddings)
+    return loss
 
 import torch
 import torch.nn.functional as F

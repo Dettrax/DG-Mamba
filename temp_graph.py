@@ -1,43 +1,30 @@
-import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib import pyplot as plt
 
-# Data
-models = ['MambaG2G', 'TransformerG2G']
-metrics = ['MAP', 'MRR']
-l_values = [1, 2, 3, 4, 5]
+models = ['lb = 1', 'lb = 2', 'lb = 3', 'lb = 4', 'lb = 5']
+x_pos = np.arange(len(models))
+MAP_transg2g = [0.0241, 0.0347, 0.0340, 0.0342, 0.0495]
+std_transg2g = [0.0152, 0.0222, 0.0256, 0.0244, 0.0107]
 
-# MambaG2G values
-mambaG2G_MAP = [0.1108, 0.1228, 0.09776, 0.0979, 0.1206]
-mambaG2G_MAP_err = [0.0061, 0.0087, 0.0012, 0.0015, 0.0126]
-mambaG2G_MRR = [0.4228, 0.4615, 0.4800, 0.4761, 0.4324]
-mambaG2G_MRR_err = [0.0034, 0.0007, 0.0056, 0.0001, 0.0008]
+MAP_Mam = [0.0766, 0.1244, 0.131, 0.1425, 0.0938]
+std_Mam = [0.0034, 0.0013, 0.0015, 0.0019, 0.002]
 
-# TransformerG2G values
-transformerG2G_MAP = [0.0241, 0.2057, 0.0340, 0.0342, 0.0495]
-transformerG2G_MAP_err = [0.0152, 0.0356, 0.0256, 0.0244, 0.0107]
-transformerG2G_MRR = [0.2616, 0.2947, 0.2905, 0.3042, 0.3447]
-transformerG2G_MRR_err = [0.0879, 0.1087, 0.1121, 0.1115, 0.0196]
 
-# Plot
-fig, axs = plt.subplots(2, 1, figsize=(10, 10))
+fig, ax = plt.subplots()
+width = 0.4
+# ax.bar(x_pos[:1], MAP[:1], yerr=std[:1], align='center', alpha=0.5, ecolor='black', capsize=10, width = width)
+ax.bar(x_pos[0:]-width/2, MAP_transg2g[0:], yerr=std_transg2g[0:], align='center', alpha=0.5, ecolor='black', capsize=10, width = width)
+ax.bar(x_pos[0:]+width/2, MAP_Mam, yerr=std_Mam, align='center', alpha=0.5, ecolor='black', capsize=10, width = width)
+ax.set_ylabel('MAP',fontsize = 12)
+ax.set_xticks(x_pos)
+ax.set_xticklabels(models, fontsize = 12)
+ax.set_title('UCI', fontsize = 16)
+ax.yaxis.grid(True)
 
-# Plot MAP
-axs[0].errorbar(l_values, mambaG2G_MAP, yerr=mambaG2G_MAP_err, fmt='-o', label='MambaG2G')
-axs[0].errorbar(l_values, transformerG2G_MAP, yerr=transformerG2G_MAP_err, fmt='-o', label='TransformerG2G')
-axs[0].set_title('MAP vs. l')
-axs[0].set_xlabel('l')
-axs[0].set_ylabel('MAP')
-axs[0].legend()
-axs[0].grid(True)
-
-# Plot MRR
-axs[1].errorbar(l_values, mambaG2G_MRR, yerr=mambaG2G_MRR_err, fmt='-o', label='MambaG2G')
-axs[1].errorbar(l_values, transformerG2G_MRR, yerr=transformerG2G_MRR_err, fmt='-o', label='TransformerG2G')
-axs[1].set_title('MRR vs. l')
-axs[1].set_xlabel('l')
-axs[1].set_ylabel('MRR')
-axs[1].legend()
-axs[1].grid(True)
-
+# Save the figure and show
 plt.tight_layout()
+plt.ylim([0, 0.15])
+plt.savefig('bar_plot_with_error_bars.png')
+plt.legend(['TransformerG2G', 'MambaG2G'])
 plt.show()
+

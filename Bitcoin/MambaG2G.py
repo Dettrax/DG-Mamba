@@ -9,7 +9,7 @@ from torch_geometric.utils import dense_to_sparse
 
 import os
 try :
-    os.chdir("SBM")
+    os.chdir("Bitcoin")
 except:
     pass
 from tqdm import tqdm
@@ -18,12 +18,12 @@ from models import *
 from utils import *
 import pickle
 import json
-from eval_mod import get_MAP_avg
+from exp_mod import get_MAP_avg
 # hyperparams
-dim_out = 64
-dim_in  = 1000
+dim_out = 256
+dim_in  = 5881
 
-dim_val = 256
+dim_val = 512
 
 
 
@@ -31,7 +31,7 @@ dim_val = 256
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(device)
 
-class SBMDataset(Dataset):
+class BITDataset(Dataset):
     def __init__(self, data, lookback):
         self.data = data
         self.lookback = lookback
@@ -43,16 +43,16 @@ class SBMDataset(Dataset):
     def temp_process(self, data, lookback):
 
         dataset = {}
-        for i in range(lookback, 50):
-            B = np.zeros((1000, lookback + 1, 1000))
+        for i in range(lookback, 137):  # lookback + 1 because ignore timestamp 2
+            B = np.zeros((5881, lookback + 1, 5881))
             for j in range(lookback + 1):
-                B[:, j, :] = data[i - lookback + j][0].todense()
+                adj_matr = data[i - lookback + j][0].todense()
+                B[:adj_matr.shape[0], j, :adj_matr.shape[1]] = adj_matr
             dataset[i] = B
 
-        # Construct dict of hops and scale terms
         hop_dict = {}
         scale_terms_dict = {}
-        for i in range(lookback, 50):
+        for i in range(lookback, 137):
             hops = get_hops(data[i][0], 2)
             scale_terms = {h if h != -1 else max(hops.keys()) + 1:
                                hops[h].sum(1).A1 if h != -1 else hops[1].shape[0] - hops[h].sum(1).A1
@@ -60,9 +60,11 @@ class SBMDataset(Dataset):
             hop_dict[i] = hops
             scale_terms_dict[i] = scale_terms
 
+        # Construct dict of triplets
         triplet_dict = {}
         scale_dict = {}
-        for i in range(lookback, 50):
+
+        for i in range(lookback, 137):
             triplet, scale = to_triplets(sample_all_hops(hop_dict[i]), scale_terms_dict[i])
             triplet_dict[i] = triplet
             scale_dict[i] = scale
@@ -80,7 +82,7 @@ class SBMDataset(Dataset):
         return  x, triplet, scale
 
 # Get dataset and construct dict
-data = get_data()
+data = dataset_bit_alpha('..')
 
 
 # Train/Val/Test split
@@ -104,7 +106,7 @@ data = get_data()
 def val_loss(t,val_data):
     l = []
     t.eval()
-    for i in range(35,40):
+    for i in range(95,109):
         x ,triplet, scale = val_data[i]
         x = x.clone().detach().requires_grad_(True).to(device)
         _, muval, sigmaval = t(x)
@@ -142,7 +144,7 @@ class MambaG2G(torch.nn.Module):
 
 
 def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay):
-    dataset = SBMDataset(data, lookback)
+    dataset = BITDataset(data, lookback)
 
 
     config = {
@@ -160,10 +162,11 @@ def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay)
     train_loss = []
     test_loss = []
     best_MAP = 0
+    best_model = None
     for e in tqdm(range(100)):
         model.train()
         loss_step = []
-        for i in range(lookback, 35):
+        for i in range(lookback,95):
             x ,triplet, scale = dataset[i]
             x = x.clone().detach().requires_grad_(True).to(device)
             optimizer.zero_grad()
@@ -176,36 +179,36 @@ def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay)
                 print(triplet)'''
             loss.backward()
             optimizer.step()
-        # val_losses.append(val_loss(model,dataset))
-        # train_loss.append(np.mean(loss_step))
-        #
-        # if e%5 == 0:
-        #         # if e %5 ==0:
-        #     mu_timestamp = []
-        #     sigma_timestamp = []
-        #     with torch.no_grad():
-        #         model.eval()
-        #         for i in range(lookback, 50):
-        #             x,  triplet, scale = dataset[i]
-        #             x = x.clone().detach().requires_grad_(False).to(device)
-        #             _, mu, sigma = model(x)
-        #             mu_timestamp.append(mu.cpu().detach().numpy())
-        #             sigma_timestamp.append(sigma.cpu().detach().numpy())
-        #
-        #     # Save mu and sigma matrices
-        #     save_sigma_mu = True
-        #     sigma_L_arr = []
-        #     mu_L_arr = []
-        #     if save_sigma_mu == True:
-        #         sigma_L_arr.append(sigma_timestamp)
-        #         mu_L_arr.append(mu_timestamp)
-        #     curr_MAP ,curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
-        #     if curr_MAP > best_MAP:
-        #         best_MAP = curr_MAP
-        #         torch.save(model.state_dict(), 'best_model.pth')
-        #         print("Best MAP: ",e, best_MAP,sep=" ")
-        #     print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {np.mean(np.stack(val_losses))} Best MAP: {best_MAP}")
-    return model , val_losses , train_loss , test_loss
+        val_losses.append(val_loss(model,dataset))
+        train_loss.append(np.mean(loss_step))
+
+        if e%5 == 0:
+                # if e %5 ==0:
+            mu_timestamp = []
+            sigma_timestamp = []
+            with torch.no_grad():
+                model.eval()
+                for i in range(lookback,137):
+                    x,  triplet, scale = dataset[i]
+                    x = x.clone().detach().requires_grad_(False).to(device)
+                    _, mu, sigma = model(x)
+                    mu_timestamp.append(mu.cpu().detach().numpy())
+                    sigma_timestamp.append(sigma.cpu().detach().numpy())
+
+            # Save mu and sigma matrices
+            save_sigma_mu = True
+            sigma_L_arr = []
+            mu_L_arr = []
+            if save_sigma_mu == True:
+                sigma_L_arr.append(sigma_timestamp)
+                mu_L_arr.append(mu_timestamp)
+            curr_MAP ,curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
+            if curr_MAP > best_MAP:
+                best_MAP = curr_MAP
+                best_model = model
+                print("Best MAP: ",e, best_MAP,sep=" ")
+            print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {np.mean(np.stack(val_losses))} Best MAP: {best_MAP}")
+    return best_model , val_losses , train_loss , test_loss
 
 lookback = 5
 #{'lr': 0.0030654227230925636, 'lin_dim': 47, 'd_conv': 6, 'lookback': 4, 'd_state': 25, 'dropout': 0.3725448646977555, 'weight_decay': 1.02596357976919e-05}
@@ -217,14 +220,14 @@ model , val_losses , train_loss , test_loss = optimise_mamba(data,lookback,47,6,
 #     'd_conv': 6
 # }
 # model = MambaG2G(config, 23, dim_out, dim_val, dropout=0.495).to(device)
-dataset = SBMDataset(data, lookback)
-from eval_mod import get_MAP_avg
-model.load_state_dict(torch.load('best_model.pth'))
+dataset = BITDataset(data, lookback)
+from exp_mod import get_MAP_avg
+
 mu_timestamp = []
 sigma_timestamp = []
 with torch.no_grad():
     model.eval()
-    for i in range(lookback, 50):
+    for i in range(lookback,137):
         x, triplet, scale = dataset[i]
         x = x.clone().detach().requires_grad_(False).to(device)
         _, mu, sigma = model(x)
@@ -232,7 +235,7 @@ with torch.no_grad():
         sigma_timestamp.append(sigma.cpu().detach().numpy())
 
 # Save mu and sigma matrices
-name = 'Results/SBM'
+name = 'Results/Bitcoin'
 save_sigma_mu = True
 sigma_L_arr = []
 mu_L_arr = []
@@ -254,28 +257,3 @@ print("Std MAP: ", np.std(MAPS))
 print("Std MRR: ", np.std(MRR))
 print("Time taken: ", time.time()-start)
 
-
-
-# import time
-# from exp_mod import get_MAP_avg
-# start = time.time()
-# MAPS = []
-# MRR = []
-# for i in tqdm(range(5)):
-#     curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
-#     MAPS.append(curr_MAP)
-#     MRR.append(curr_MRR)
-# #print mean and std of map and mrr
-# print("Mean MAP: ", np.mean(MAPS))
-# print("Mean MRR: ", np.mean(MRR))
-# print("Std MAP: ", np.std(MAPS))
-# print("Std MRR: ", np.std(MRR))
-# print("Time taken: ", time.time()-start)
-#
-# if save_sigma_mu == True:
-#     if not os.path.exists(name+'/Eval_Results/saved_array'):
-#         os.makedirs(name+'/Eval_Results/saved_array')
-#     with open(name+'/Eval_Results/saved_array/sigma_as','wb') as f: pickle.dump(sigma_L_arr, f)
-#     with open(name+'/Eval_Results/saved_array/mu_as','wb') as f: pickle.dump(mu_L_arr, f)
-#
-#

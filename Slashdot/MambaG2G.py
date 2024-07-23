@@ -219,4 +219,4 @@ def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay)
 
     return model , val_losses , train_loss , test_loss
 lookback = 4
-model , val_losses , train_loss , test_loss = optimise_mamba(data,lookback,51,6,6,0.272,0.00093,0.0008)
+model , val_losses , train_loss , test_loss = optimise_mamba(data,lookback,lin_dim=28,d_conv=5,d_state=44,dropout=0.44539,lr=2.7608713668855892e-05,weight_decay=0.0001580)
