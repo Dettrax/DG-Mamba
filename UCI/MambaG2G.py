@@ -183,51 +183,51 @@ def optimise_mamba(data,lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay):
                 print(triplet)'''
             loss.backward()
             optimizer.step()
-        val_losses.append(val_loss(model,dataset))
-        train_loss.append(np.mean(loss_step))
-
-        val_loss_value = 0.0
-        val_samples = 0
-        with torch.no_grad():
-            model.eval()
-            for i in range(71, 88):
-                x, triplet, scale = dataset[i]
-                optimizer.zero_grad()
-                x = x.clone().detach().requires_grad_(False).to(device)
-                _, mu, sigma = model(x)
-                curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
-                val_loss_value += curr_val_loss
-
-                val_samples += 1
-            val_loss_value /= val_samples
-        test_loss.append(val_loss_value)
-        # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {np.mean(np.stack(val_losses))}")
-        scheduler.step(val_loss_value)
-        if e %5 ==0:
-            mu_timestamp = []
-            sigma_timestamp = []
-            with torch.no_grad():
-                model.eval()
-                for i in range(lookback, 88):
-                    x,  triplet, scale = dataset[i]
-                    x = x.clone().detach().requires_grad_(False).to(device)
-                    _, mu, sigma = model(x)
-                    mu_timestamp.append(mu.cpu().detach().numpy())
-                    sigma_timestamp.append(sigma.cpu().detach().numpy())
-
-            # Save mu and sigma matrices
-            name = 'Results/RealityMining'
-            save_sigma_mu = True
-            sigma_L_arr = []
-            mu_L_arr = []
-            if save_sigma_mu == True:
-                sigma_L_arr.append(sigma_timestamp)
-                mu_L_arr.append(mu_timestamp)
-            curr_MAP ,_ = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
-            if curr_MAP > best_MAP:
-                best_MAP = curr_MAP
-                best_model = model
-                print("Best MAP: ",e, best_MAP,sep=" ")
+        # val_losses.append(val_loss(model,dataset))
+        # train_loss.append(np.mean(loss_step))
+        #
+        # val_loss_value = 0.0
+        # val_samples = 0
+        # with torch.no_grad():
+        #     model.eval()
+        #     for i in range(71, 88):
+        #         x, triplet, scale = dataset[i]
+        #         optimizer.zero_grad()
+        #         x = x.clone().detach().requires_grad_(False).to(device)
+        #         _, mu, sigma = model(x)
+        #         curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
+        #         val_loss_value += curr_val_loss
+        #
+        #         val_samples += 1
+        #     val_loss_value /= val_samples
+        # test_loss.append(val_loss_value)
+        # # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {np.mean(np.stack(val_losses))}")
+        # scheduler.step(val_loss_value)
+        # if e %5 ==0:
+        #     mu_timestamp = []
+        #     sigma_timestamp = []
+        #     with torch.no_grad():
+        #         model.eval()
+        #         for i in range(lookback, 88):
+        #             x,  triplet, scale = dataset[i]
+        #             x = x.clone().detach().requires_grad_(False).to(device)
+        #             _, mu, sigma = model(x)
+        #             mu_timestamp.append(mu.cpu().detach().numpy())
+        #             sigma_timestamp.append(sigma.cpu().detach().numpy())
+        #
+        #     # Save mu and sigma matrices
+        #     name = 'Results/RealityMining'
+        #     save_sigma_mu = True
+        #     sigma_L_arr = []
+        #     mu_L_arr = []
+        #     if save_sigma_mu == True:
+        #         sigma_L_arr.append(sigma_timestamp)
+        #         mu_L_arr.append(mu_timestamp)
+        #     curr_MAP ,_ = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
+        #     if curr_MAP > best_MAP:
+        #         best_MAP = curr_MAP
+        #         best_model = model
+        #         print("Best MAP: ",e, best_MAP,sep=" ")
 
     return best_model , val_losses , train_loss , test_loss
 lookback = 1

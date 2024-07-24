@@ -115,6 +115,7 @@ def val_loss(t):
 epochs = 200
 loss_mainlist = []
 val_mainlist = []
+#print model params count
 for e in range(epochs):
     loss_list = []
     for i in range(lookback,9):
@@ -143,7 +144,7 @@ for e in range(epochs):
     print(f"Epoch: {e}, Average loss: {np.mean(loss_list)}, Val loss: {val_mainlist[-1]}" )
     if e%10==0:
         name = 'model' + str(e)+'.pth'
-        torch.save(t.state_dict(), name)    
+        torch.save(t.state_dict(), name)
 
 
 plt.figure()

@@ -12,7 +12,7 @@ except:
 from models import *
 from utils import *
 import pickle
-from eval_mod import get_MAP_avg
+from exp_mod import get_MAP_avg
 import json
 from torch.utils.data import Dataset, DataLoader
 from torch_geometric.utils import dense_to_sparse
@@ -83,15 +83,8 @@ dim_out = 64
 dim_in = 96
 
 dim_val = 256
-dim_attn = 256
-lr = 0.0001
 
-n_heads = 1
-n_encoder_layers = 1
 
-f = open("config.json")
-config = json.load(f)
-lookback = config["lookback"]
 
 # Check GPU availability
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -347,7 +340,7 @@ class MambaConv(torch.nn.Module):
         ###
 
         h = F.dropout(h, p=self.dropout, training=self.training)
-        h = h + x  # Residual connection.
+        h =  h +x   # Residual connection.
         if self.norm2 is not None:
             if self.norm_with_batch:
                 h = self.norm2(h, batch=batch)
@@ -466,7 +459,7 @@ def optimise_mamba(lookback, window_size, stride, channel, pe_dim, num_layers, d
                        ).to(device)
     print('Total parameters:', sum(p.numel() for p in model.parameters()))
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=3, min_lr=1e-5)
+
 
     val_losses = []
     train_loss = []
@@ -489,29 +482,6 @@ def optimise_mamba(lookback, window_size, stride, channel, pe_dim, num_layers, d
             loss.backward()
             clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-        val_loss_value = 0.0
-        val_samples = 0
-
-        with torch.no_grad():
-            model.eval()
-            for i in range(63, 72):
-                x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-                optimizer.zero_grad()
-                x = x.clone().detach().requires_grad_(False).to(device)
-                pe = pe.clone().detach().requires_grad_(False).to(device)
-                edge_index = edge_index.clone().detach().to(device)
-                edge_attr = edge_attr.clone().detach().requires_grad_(False).to(device)
-                batch = batch.clone().detach().to(device)
-                mu, sigma = model(x, pe, edge_index, edge_attr,
-                                  batch)
-                curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
-                val_loss_value += curr_val_loss
-
-                val_samples += 1
-            val_loss_value /= val_samples
-        print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {val_loss_value}")
-        val_losses.append(val_loss_value)
-        train_loss.append(np.mean(np.stack(loss_step)))
     mu_timestamp = []
     sigma_timestamp = []
     with torch.no_grad():
@@ -527,16 +497,24 @@ def optimise_mamba(lookback, window_size, stride, channel, pe_dim, num_layers, d
             mu_timestamp.append(mu.cpu().detach().numpy())
             sigma_timestamp.append(sigma.cpu().detach().numpy())
 
-    # name = 'Results/RealityMining'
-    # save_sigma_mu = True
-    # sigma_L_arr = []
-    # mu_L_arr = []
-    # if save_sigma_mu:
-    #     sigma_L_arr.append(sigma_timestamp)
-    #     mu_L_arr.append(mu_timestamp)
-    # for i in range(3):
-    #     MAP, MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback, data)
-    #     print(f"MAP: {MAP} MRR: {MRR}")
+    name = 'Results/RealityMining'
+    save_sigma_mu = True
+    sigma_L_arr = []
+    mu_L_arr = []
+    if save_sigma_mu:
+        sigma_L_arr.append(sigma_timestamp)
+        mu_L_arr.append(mu_timestamp)
+    MAPS = []
+    MRRS = []
+    for i in range(5):
+        try:
+            MAP, MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback, data)
+        except:
+            MAP = 0
+            MRR = 0
+        MAPS.append(MAP)
+        MRRS.append(MRR)
+    print(f"MAP: {np.mean(MAPS)} MRR: {np.mean(MRRS)}")
 
 
     return model , val_losses , train_loss
@@ -547,8 +525,6 @@ def optimise_mamba(lookback, window_size, stride, channel, pe_dim, num_layers, d
 model , val_losses , loss_step  = optimise_mamba(2,96,1,31,4,4,2,15,0.3213168331944855,2.0725755122766534e-05,0.00039996048924527774,16)
 
 
-print("Average Validation Loss: ", np.mean(val_losses))
-print("Average Training Loss: ", np.mean(loss_step))
 #pplot loss
 #add legend
 # y title and x title for loss vs epoch
@@ -563,34 +539,34 @@ print("Average Training Loss: ", np.mean(loss_step))
 
 lookback = 2
 dataset = RMDataset(data, lookback, 16)
-mu_timestamp = []
-sigma_timestamp = []
-with torch.no_grad():
-    model.eval()
-    for i in range(lookback, 90):
-        x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-        x = x.clone().detach().requires_grad_(False).to(device)
-        pe = pe.clone().detach().requires_grad_(False).to(device)
-        edge_index = edge_index.clone().detach().to(device)
-        edge_attr = edge_attr.clone().detach().requires_grad_(False).to(device)
-        batch = batch.clone().detach().to(device)
-        mu, sigma = model(x, pe, edge_index, edge_attr, batch)
-        mu_timestamp.append(mu.cpu().detach().numpy())
-        sigma_timestamp.append(sigma.cpu().detach().numpy())
+# mu_timestamp = []
+# sigma_timestamp = []
+# with torch.no_grad():
+#     model.eval()
+#     for i in range(lookback, 90):
+#         x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+#         x = x.clone().detach().requires_grad_(False).to(device)
+#         pe = pe.clone().detach().requires_grad_(False).to(device)
+#         edge_index = edge_index.clone().detach().to(device)
+#         edge_attr = edge_attr.clone().detach().requires_grad_(False).to(device)
+#         batch = batch.clone().detach().to(device)
+#         mu, sigma = model(x, pe, edge_index, edge_attr, batch)
+#         mu_timestamp.append(mu.cpu().detach().numpy())
+#         sigma_timestamp.append(sigma.cpu().detach().numpy())
+#
+# name = 'Results/RealityMining'
+# save_sigma_mu = True
+# sigma_L_arr = []
+# mu_L_arr = []
+# if save_sigma_mu:
+#     sigma_L_arr.append(sigma_timestamp)
+#     mu_L_arr.append(mu_timestamp)
+# for i in range(5):
+#     MAP, MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback, data)
+#     print(f"MAP: {MAP} MRR: {MRR}")
 
-name = 'Results/RealityMining'
-save_sigma_mu = True
-sigma_L_arr = []
-mu_L_arr = []
-if save_sigma_mu:
-    sigma_L_arr.append(sigma_timestamp)
-    mu_L_arr.append(mu_timestamp)
-for i in range(5):
-    MAP, MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback, data)
-    print(f"MAP: {MAP} MRR: {MRR}")
-
-if save_sigma_mu == True:
-    if not os.path.exists(name+'/Eval_Results/saved_array'):
-        os.makedirs(name+'/Eval_Results/saved_array')
-    with open(name+'/Eval_Results/saved_array/sigma_as','wb') as f: pickle.dump(sigma_L_arr, f)
-    with open(name+'/Eval_Results/saved_array/mu_as','wb') as f: pickle.dump(mu_L_arr, f)
+# if save_sigma_mu == True:
+#     if not os.path.exists(name+'/Eval_Results/saved_array'):
+#         os.makedirs(name+'/Eval_Results/saved_array')
+#     with open(name+'/Eval_Results/saved_array/sigma_as','wb') as f: pickle.dump(sigma_L_arr, f)
+#     with open(name+'/Eval_Results/saved_array/mu_as','wb') as f: pickle.dump(mu_L_arr, f)
