@@ -233,7 +233,7 @@ def get_MAP_avg(mu_arr,sigma_arr,lookback,data):
             #     for i in range (70, len(val_timestep)):
             count = 0
 
-            for ctr in range(63,72):
+            for ctr in range(72,90):
 
                 A_node = data[ctr][0].shape[0]
                 A = data[ctr][0]

@@ -18,7 +18,7 @@ from models import *
 from utils import *
 import pickle
 import json
-from exp_mod import get_MAP_avg
+from eval_mod import get_MAP_avg
 # hyperparams
 dim_out = 256
 dim_in  = 5881
@@ -43,7 +43,7 @@ class BITDataset(Dataset):
     def temp_process(self, data, lookback):
 
         dataset = {}
-        for i in range(lookback, 137):  # lookback + 1 because ignore timestamp 2
+        for i in range(lookback, 10):  # lookback + 1 because ignore timestamp 2
             B = np.zeros((5881, lookback + 1, 5881))
             for j in range(lookback + 1):
                 adj_matr = data[i - lookback + j][0].todense()
@@ -52,7 +52,7 @@ class BITDataset(Dataset):
 
         hop_dict = {}
         scale_terms_dict = {}
-        for i in range(lookback, 137):
+        for i in range(lookback, 10):
             hops = get_hops(data[i][0], 2)
             scale_terms = {h if h != -1 else max(hops.keys()) + 1:
                                hops[h].sum(1).A1 if h != -1 else hops[1].shape[0] - hops[h].sum(1).A1
@@ -64,7 +64,7 @@ class BITDataset(Dataset):
         triplet_dict = {}
         scale_dict = {}
 
-        for i in range(lookback, 137):
+        for i in range(lookback, 10):
             triplet, scale = to_triplets(sample_all_hops(hop_dict[i]), scale_terms_dict[i])
             triplet_dict[i] = triplet
             scale_dict[i] = scale
@@ -114,14 +114,46 @@ def val_loss(t,val_data):
         l.append(val_l.cpu().detach().numpy())
     return np.mean(l)
 
+datasets = {}
+for i in [2]:
+    datasets[i] = BITDataset(data, i)
+
+
+class SparseLinear(torch.nn.Module):
+    def __init__(self, size_i_1, size_i, bias=True):
+        super().__init__()
+        self.size_i_1 = size_i_1
+        self.size_i = size_i
+        self.bias = bias
+        self.out_channels = size_i
+        self.in_channels = size_i_1
+
+        # self.weight = torch.nn.Parameter(torch.randn(size_i_1, size_i))
+        self.weight = torch.nn.Parameter(torch.empty(size_i, size_i_1))
+        # self.bias = torch.nn.Parameter(torch.randn(size_i))
+        self.bias = torch.nn.Parameter(torch.empty(size_i))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        torch.nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = torch.nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            torch.nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, input):
+        # y = torch.sparse.mm(input, self.weight) + self.bias
+        y = torch.sparse.mm(input, self.weight.T) + self.bias
+        return y
+
 
 class MambaG2G(torch.nn.Module):
-    def __init__(self, config, lin_dim, dim_out,dim_val, dropout=0.2):
+    def __init__(self, config, lin_dim, dim_out, dim_val, dropout=0.2):
         super(MambaG2G, self).__init__()
         self.D = lin_dim
         self.elu = nn.ELU()
         self.mamba = Mamba(d_model=config['d_model'], d_state=config['d_state'], d_conv=config['d_conv'])
-
+        self.enc_input_fc = SparseLinear(dim_in, 64)
         # self.enc_input_fc = nn.Linear(dim_in, dim_in)
         self.dropout = nn.Dropout(p=dropout)  # Add Dropout layer
         self.out_fc = nn.Linear(config['d_model'], self.D)  # Adjusted to match output dimension
@@ -129,8 +161,12 @@ class MambaG2G(torch.nn.Module):
         self.mu_fc = nn.Linear(self.D, dim_out)
 
     def forward(self, input):
-
-        e = self.mamba(input)
+        out_tuple = ()
+        for i in range(input.size(1)):
+            out_mat = self.enc_input_fc(input[:, i, :])
+            out_tuple += (out_mat,)
+        z = torch.stack(out_tuple, 1)
+        e = self.mamba(z)
         e = e.mean(dim=1)  # Average pooling to maintain the expected shape
         e = self.dropout(e)  # Apply dropout after average pooling
         x = torch.tanh(self.out_fc(e))
@@ -143,117 +179,66 @@ class MambaG2G(torch.nn.Module):
         return x, mu, sigma
 
 
-def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay):
-    dataset = BITDataset(data, lookback)
-
+def optimise_mamba(data,dataset, lookback, lin_dim, d_conv, d_state, dropout, lr, weight_decay):
 
     config = {
-        'd_model':dim_in,
-        'd_state':d_state,
-        'd_conv':d_conv
+        'd_model': 64,
+        'd_state': d_state,
+        'd_conv': d_conv
     }
 
-    model = MambaG2G(config, lin_dim, dim_out,dim_val, dropout=dropout).to(device)
-    #print total model parameters
+    model = MambaG2G(config, lin_dim, dim_out, dim_val, dropout=dropout).to(device)
+    # print total model parameters
     print('Total parameters:', sum(p.numel() for p in model.parameters()))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     val_losses = []
     train_loss = []
     test_loss = []
-    best_MAP = 0
+    best_MAP = -1
     best_model = None
-    for e in tqdm(range(100)):
+    for e in tqdm(range(51)):
         model.train()
         loss_step = []
-        for i in range(lookback,95):
-            x ,triplet, scale = dataset[i]
+        for i in range(lookback, 10):
+            x, triplet, scale = dataset[i]
             x = x.clone().detach().requires_grad_(True).to(device)
             optimizer.zero_grad()
             _, mu, sigma = model(x)
             # loss = build_loss(triplet_dict[i], scale_dict[i],mu,sigma,64, scale = False)
-            loss = build_loss(triplet, scale, mu, sigma, dim_out, scale=False)
+            loss = build_loss(triplet, scale, mu, sigma, 256, scale=False)
             loss_step.append(loss.cpu().detach().numpy())
             # print(f"Epoch: {e}, Timestamp: {i},Loss: {loss_list[-1]}")
             '''if i==lookback:
                 print(triplet)'''
             loss.backward()
             optimizer.step()
-        val_losses.append(val_loss(model,dataset))
-        train_loss.append(np.mean(loss_step))
 
-        if e%5 == 0:
-                # if e %5 ==0:
-            mu_timestamp = []
-            sigma_timestamp = []
-            with torch.no_grad():
-                model.eval()
-                for i in range(lookback,137):
-                    x,  triplet, scale = dataset[i]
-                    x = x.clone().detach().requires_grad_(False).to(device)
-                    _, mu, sigma = model(x)
-                    mu_timestamp.append(mu.cpu().detach().numpy())
-                    sigma_timestamp.append(sigma.cpu().detach().numpy())
+        mu_timestamp = []
+        sigma_timestamp = []
+        with torch.no_grad():
+            model.eval()
+            for i in range(lookback, 10):
+                x, triplet, scale = dataset[i]
+                x = x.clone().detach().requires_grad_(False).to(device)
+                _, mu, sigma = model(x)
+                mu_timestamp.append(mu.cpu().detach().numpy())
+                sigma_timestamp.append(sigma.cpu().detach().numpy())
 
-            # Save mu and sigma matrices
-            save_sigma_mu = True
-            sigma_L_arr = []
-            mu_L_arr = []
-            if save_sigma_mu == True:
-                sigma_L_arr.append(sigma_timestamp)
-                mu_L_arr.append(mu_timestamp)
-            curr_MAP ,curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
-            if curr_MAP > best_MAP:
-                best_MAP = curr_MAP
-                best_model = model
-                print("Best MAP: ",e, best_MAP,sep=" ")
-            print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {np.mean(np.stack(val_losses))} Best MAP: {best_MAP}")
-    return best_model , val_losses , train_loss , test_loss
+        # Save mu and sigma matrices
+        save_sigma_mu = True
+        sigma_L_arr = []
+        mu_L_arr = []
+        if save_sigma_mu == True:
+            sigma_L_arr.append(sigma_timestamp)
+            mu_L_arr.append(mu_timestamp)
 
-lookback = 5
-#{'lr': 0.0030654227230925636, 'lin_dim': 47, 'd_conv': 6, 'lookback': 4, 'd_state': 25, 'dropout': 0.3725448646977555, 'weight_decay': 1.02596357976919e-05}
-model , val_losses , train_loss , test_loss = optimise_mamba(data,lookback,47,6,25,0.3725448646977555, 0.0030654227230925636, 1.02596357976919e-05)
+        curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback, data, device)
 
-# config = {
-#     'd_model': dim_in,
-#     'd_state': 13,
-#     'd_conv': 6
-# }
-# model = MambaG2G(config, 23, dim_out, dim_val, dropout=0.495).to(device)
-dataset = BITDataset(data, lookback)
-from exp_mod import get_MAP_avg
+    return model, val_losses, train_loss, test_loss
 
-mu_timestamp = []
-sigma_timestamp = []
-with torch.no_grad():
-    model.eval()
-    for i in range(lookback,137):
-        x, triplet, scale = dataset[i]
-        x = x.clone().detach().requires_grad_(False).to(device)
-        _, mu, sigma = model(x)
-        mu_timestamp.append(mu.cpu().detach().numpy())
-        sigma_timestamp.append(sigma.cpu().detach().numpy())
 
-# Save mu and sigma matrices
-name = 'Results/Bitcoin'
-save_sigma_mu = True
-sigma_L_arr = []
-mu_L_arr = []
-if save_sigma_mu == True:
-    sigma_L_arr.append(sigma_timestamp)
-    mu_L_arr.append(mu_timestamp)
-import time
-start = time.time()
-MAPS = []
-MRR = []
-for i in tqdm(range(5)):
-    curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
-    MAPS.append(curr_MAP)
-    MRR.append(curr_MRR)
-#print mean and std of map and mrr
-print("Mean MAP: ", np.mean(MAPS))
-print("Mean MRR: ", np.mean(MRR))
-print("Std MAP: ", np.std(MAPS))
-print("Std MRR: ", np.std(MRR))
-print("Time taken: ", time.time()-start)
-
+lookback = 2
+# {'lr': 0.0030654227230925636, 'lin_dim': 47, 'd_conv': 6, 'lookback': 4, 'd_state': 25, 'dropout': 0.3725448646977555, 'weight_decay': 1.02596357976919e-05}
+model, val_losses, train_loss, test_loss = optimise_mamba(data,datasets[lookback], lookback, 15, 2, 25, 0.3725448646977555,
+                                                          0.0030654227230925636, 1.02596357976919e-03)

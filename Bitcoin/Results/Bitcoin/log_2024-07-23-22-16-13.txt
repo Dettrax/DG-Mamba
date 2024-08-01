@@ -1,0 +1,1 @@
+DEBUG:root:{'K': 2, 'lookback': 5, 'p_test': 0.0, 'p_val': 0.1, 'p_nodes': 0.0, 'n_hidden': [512], 'max_iter': 700, 'tolerance': 100, 'time_list': [1, 5, 10, 20, 25, 50, 60, 80, 99], 'L_list': [256], 'save_time_complex': True, 'save_MRR_MAP': True, 'save_sigma_mu': True, 'scale': False, 'seed': 0, 'verbose': True}

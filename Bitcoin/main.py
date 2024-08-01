@@ -34,6 +34,8 @@ print(device)
 
 #init network and optimizer
 t = Graph2Gauss_Torch(dim_val, dim_attn, dim_in, dim_out, n_encoder_layers, n_heads, lookback)
+#print model param count
+print(f"Model param count: {sum(p.numel() for p in t.parameters())}")
 optimizer = torch.optim.Adam(t.parameters(), lr=lr)
 t.to(device)
 

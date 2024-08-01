@@ -348,7 +348,7 @@ def get_inf(data, mu_64, sigma_64, lookback,mult):
     return_dict = {}
     #     for i in range (1, len(val_timestep) - 30):
     count = 0
-    for ctr in range(lookback + 1, 63):
+    for ctr in range(lookback, 63):
 
         A_node = data[ctr][0].shape[0]
         A = data[ctr][0]
@@ -357,7 +357,7 @@ def get_inf(data, mu_64, sigma_64, lookback,mult):
             if A_node > A_prev_node:
                 A = A[:A_prev_node, :A_prev_node]
 
-            if ctr < 63 and ctr > 2:
+            if ctr < 63 :
 
                 ones_edj = A.nnz
                 if A.shape[0] * mult <= (A.shape[0] - 1) * (A.shape[0] - 1):
@@ -475,9 +475,9 @@ def get_MAP_avg(mu_arr,sigma_arr,lookback,data):
         for epoch in range(num_epochs):
             #     for i in range (1, len(val_timestep) - 30):
             timestamploss_list = []
-            for ctr in range(lookback + 1, 63):
+            for ctr in range(lookback+1, 63):
                 if count > 0:
-                    if ctr < 63 and ctr > 2:
+                    if ctr < 63 :
 
                         if ctr > 0:
                             classify.train()
@@ -527,7 +527,7 @@ def get_MAP_avg(mu_arr,sigma_arr,lookback,data):
             #     for i in range (70, len(val_timestep)):
             count = 0
 
-            for ctr in range(62, 71):
+            for ctr in range(72,89):
 
                 A_node = data[ctr][0].shape[0]
                 A = data[ctr][0]

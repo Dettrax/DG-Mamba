@@ -176,35 +176,35 @@ def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay)
                 print(triplet)'''
             loss.backward()
             optimizer.step()
-        # val_losses.append(val_loss(model,dataset))
-        # train_loss.append(np.mean(loss_step))
-        #
-        # if e%5 == 0:
-        #         # if e %5 ==0:
-        #     mu_timestamp = []
-        #     sigma_timestamp = []
-        #     with torch.no_grad():
-        #         model.eval()
-        #         for i in range(lookback, 50):
-        #             x,  triplet, scale = dataset[i]
-        #             x = x.clone().detach().requires_grad_(False).to(device)
-        #             _, mu, sigma = model(x)
-        #             mu_timestamp.append(mu.cpu().detach().numpy())
-        #             sigma_timestamp.append(sigma.cpu().detach().numpy())
-        #
-        #     # Save mu and sigma matrices
-        #     save_sigma_mu = True
-        #     sigma_L_arr = []
-        #     mu_L_arr = []
-        #     if save_sigma_mu == True:
-        #         sigma_L_arr.append(sigma_timestamp)
-        #         mu_L_arr.append(mu_timestamp)
-        #     curr_MAP ,curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
-        #     if curr_MAP > best_MAP:
-        #         best_MAP = curr_MAP
-        #         torch.save(model.state_dict(), 'best_model.pth')
-        #         print("Best MAP: ",e, best_MAP,sep=" ")
-        #     print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {np.mean(np.stack(val_losses))} Best MAP: {best_MAP}")
+        val_losses.append(val_loss(model,dataset))
+        train_loss.append(np.mean(loss_step))
+
+        if e%5 == 0:
+                # if e %5 ==0:
+            mu_timestamp = []
+            sigma_timestamp = []
+            with torch.no_grad():
+                model.eval()
+                for i in range(lookback, 50):
+                    x,  triplet, scale = dataset[i]
+                    x = x.clone().detach().requires_grad_(False).to(device)
+                    _, mu, sigma = model(x)
+                    mu_timestamp.append(mu.cpu().detach().numpy())
+                    sigma_timestamp.append(sigma.cpu().detach().numpy())
+
+            # Save mu and sigma matrices
+            save_sigma_mu = True
+            sigma_L_arr = []
+            mu_L_arr = []
+            if save_sigma_mu == True:
+                sigma_L_arr.append(sigma_timestamp)
+                mu_L_arr.append(mu_timestamp)
+            curr_MAP ,curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
+            if curr_MAP > best_MAP:
+                best_MAP = curr_MAP
+                torch.save(model.state_dict(), 'best_model.pth')
+                print("Best MAP: ",e, best_MAP,sep=" ")
+            print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {np.mean(np.stack(val_losses))} Best MAP: {best_MAP}")
     return model , val_losses , train_loss , test_loss
 
 lookback = 5

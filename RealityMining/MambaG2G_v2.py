@@ -110,7 +110,7 @@ class RMDataset(Dataset):
             for j in range(lookback + 1):
                 adj_matr = data[i - lookback + j][0].todense()
                 B[:adj_matr.shape[0], j, :adj_matr.shape[1]] = adj_matr
-            dataset[i] = B
+            dataset[i] = torch.tensor(B).clone().detach().requires_grad_(True).to(device)
 
         # Construct dict of hops and scale terms
         hop_dict = {}
@@ -212,28 +212,6 @@ from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_self_loops, degree
 
 
-def permute_within_batch(x, batch):
-    # Enumerate over unique batch indices
-    unique_batches = torch.unique(batch)
-
-    # Initialize list to store permuted indices
-    permuted_indices = []
-
-    for batch_index in unique_batches:
-        # Extract indices for the current batch
-        indices_in_batch = (batch == batch_index).nonzero().squeeze()
-
-        # Permute indices within the current batch
-        permuted_indices_in_batch = indices_in_batch[torch.randperm(len(indices_in_batch))]
-
-        # Append permuted indices to the list
-        permuted_indices.append(permuted_indices_in_batch)
-
-    # Concatenate permuted indices into a single tensor
-    permuted_indices = torch.cat(permuted_indices)
-
-    return permuted_indices
-
 class ApplyConv(torch.nn.Module):
     def __init__(self,mamba_attn,dropout, channels: int, conv: Optional[MessagePassing], norm: Optional[str] = 'batch_norm', norm_kwargs: Optional[Dict[str, Any]] = None):
         super().__init__()
@@ -256,16 +234,17 @@ class ApplyConv(torch.nn.Module):
         if self.conv is not None:
             h = self.conv(x, edge_index, edge_attr, **kwargs)
             h = F.dropout(h, p=self.dropout, training=self.training)
-            h = h + x
+            h = h + x #96,96
             h = self.norm1(h)
             hs.append(h)
-        inp_mamba = x.reshape(x.size(0),1, x.size(1))
+
+        inp_mamba = x.reshape(1,x.size(0), x.size(1)) #1,96,96  Batch , time stamp , features
 
         h = self.mamba(inp_mamba)
-        h = h.mean(dim=1)
+        h = h.mean(dim=0) #96,96
         hs.append(h)
 
-        out = sum(hs)
+        out = sum(hs) #96,96
         return out
 
 class MambaG2G(torch.nn.Module):
@@ -324,17 +303,17 @@ def optimise_mamba(data,lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,w
 
     model = MambaG2G(config, dim_in, 64, dropout=dropout).to(device)
     #print total model parameters
-    # print('Total parameters:', sum(p.numel() for p in model.parameters()))
+    print('Total parameters:', sum(p.numel() for p in model.parameters()))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    for e in range(50):
+    for e in tqdm(range(50)):
         model.train()
         loss_step = []
         for i in range(lookback, 63):
                 x, triplet, scale = dataset[i]
                 optimizer.zero_grad()
-                x = x.clone().detach().requires_grad_(True).to(device)
+                # x = x.clone().detach().requires_grad_(True).to(device)
                 _,mu, sigma = model(x)
                 loss = build_loss(triplet, scale, mu, sigma, 64, scale=False)
 
@@ -342,83 +321,126 @@ def optimise_mamba(data,lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,w
                 loss.backward()
                 clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
-    f_MAP = []
-    for i in range(3):
-        mu_timestamp = []
-        sigma_timestamp = []
-        with torch.no_grad():
-            model.eval()
-            for i in range(lookback, 90):
-                x, triplet, scale = dataset[i]
-                x = x.clone().detach().requires_grad_(False).to(device)
-                _, mu, sigma = model(x)
-                mu_timestamp.append(mu.cpu().detach().numpy())
-                sigma_timestamp.append(sigma.cpu().detach().numpy())
+    # f_MAP = []
+    # for i in range(3):
+    #     mu_timestamp = []
+    #     sigma_timestamp = []
+    #     with torch.no_grad():
+    #         model.eval()
+    #         for i in range(lookback, 90):
+    #             x, triplet, scale = dataset[i]
+    #             x = x.clone().detach().requires_grad_(False).to(device)
+    #             _, mu, sigma = model(x)
+    #             mu_timestamp.append(mu.cpu().detach().numpy())
+    #             sigma_timestamp.append(sigma.cpu().detach().numpy())
+    #
+    #     # Save mu and sigma matrices
+    #     name = 'Results/RealityMining'
+    #     save_sigma_mu = True
+    #     sigma_L_arr = []
+    #     mu_L_arr = []
+    #     if save_sigma_mu == True:
+    #         sigma_L_arr.append(sigma_timestamp)
+    #         mu_L_arr.append(mu_timestamp)
+    #
+    #     MAP,_ = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
+    #     f_MAP.append(MAP)
 
-        # Save mu and sigma matrices
-        name = 'Results/RealityMining'
-        save_sigma_mu = True
-        sigma_L_arr = []
-        mu_L_arr = []
-        if save_sigma_mu == True:
-            sigma_L_arr.append(sigma_timestamp)
-            mu_L_arr.append(mu_timestamp)
-
-        MAP,_ = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
-        f_MAP.append(MAP)
-
-    return sorted(f_MAP)[0]
+    return model
 
 
 walk = 16
 #{'lr': 2.2307858381535968e-05, 'dim_in': 49, 'lookback': 4, 'd_conv': 3, 'd_state': 6, 'dropout': 0.17661562119283333, 'weight_decay': 1.466563344626497e-05}
-# model , val_losses , loss_step , test_loss = optimise_mamba(lookback=lookback,dim_in=76,d_conv=9,d_state=6,dropout=0.4285,lr=0.000120,weight_decay=2.4530158734036414e-05,walk_length=walk)
+lookback = 2
+model = optimise_mamba(data,lookback=lookback,dim_in=49,d_conv=3,d_state=6,dropout=0.1766,lr=2.2307858381535968e-05,weight_decay=1.466563344626497e-05,walk_length=walk)
 
-def train_model(config):
-    map_value = optimise_mamba(data,lookback = config['lookback'], dim_in=config['dim_in'], d_conv=config['d_conv'],d_state=config['d_state'],dropout=config['dropout'],lr=config['lr'],weight_decay=config['weight_decay'],walk_length=walk)
-    return map_value
+dataset = RMDataset(data, lookback, walk)
+#read the best_model.pt
+# model.load_state_dict(torch.load('best_model.pth'))
+mu_timestamp = []
+sigma_timestamp = []
+with torch.no_grad():
+    model.eval()
+    for i in range(lookback, 90):
+        x, triplet, scale = dataset[i]
+        x = x.clone().detach().requires_grad_(True).to(device)
+        _, mu, sigma = model(x)
+        mu_timestamp.append(mu.cpu().detach().numpy())
+        sigma_timestamp.append(sigma.cpu().detach().numpy())
+name = 'Results/RealityMining'
+save_sigma_mu = True
+sigma_L_arr = []
+mu_L_arr = []
+if save_sigma_mu == True:
+    sigma_L_arr.append(sigma_timestamp)
+    mu_L_arr.append(mu_timestamp)
+
+import time
+start = time.time()
+MAPS = []
+MRR = []
+for i in tqdm(range(5)):
+    curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
+    MAPS.append(curr_MAP)
+    MRR.append(curr_MRR)
+#print mean and std of map and mrr
+print("Mean MAP: ", np.mean(MAPS))
+print("Mean MRR: ", np.mean(MRR))
+print("Std MAP: ", np.std(MAPS))
+print("Std MRR: ", np.std(MRR))
+print("Time taken: ", time.time() - start)
 
 
-def objective(config):  # ①
-    while True:
-        acc = train_model(config)
-        train.report({"MAP": acc})  # Report to Tunevvvvvvv
 
 
-ray.init(  runtime_env={
-            "working_dir": str(os.getcwd()),
-        })  # Initialize Ray
+#
+# def train_model(config):
+#     map_value = optimise_mamba(data,lookback = config['lookback'], dim_in=config['dim_in'], d_conv=config['d_conv'],d_state=config['d_state'],dropout=config['dropout'],lr=config['lr'],weight_decay=config['weight_decay'],walk_length=walk)
+#     return map_value
+#
+#
+# def objective(config):  # ①
+#     while True:
+#         acc = train_model(config)
+#         train.report({"MAP": acc})  # Report to Tunevvvvvvv
+#
+#
+# ray.init(  runtime_env={
+#             "working_dir": str(os.getcwd()),
+#         })  # Initialize Ray
+#
+#
+# search_space = {"lr": tune.loguniform(1e-5, 1e-2)
+#         ,"dim_in": tune.randint(16, 100),
+#         "lookback": tune.randint(1,5),
+#                 "d_conv": tune.randint(2, 10),
+#                 "d_state": tune.randint(2, 50),
+#                 "dropout": tune.uniform(0.1, 0.5),
+#                 "weight_decay": tune.loguniform(1e-5, 1e-3)}
+#
+# # Create an Optuna search space
+# algo = OptunaSearch(
+# )
+#
+#
+# tuner = tune.Tuner(  # ③
+#     tune.with_resources(
+#         tune.with_parameters(objective),
+#         resources={"gpu": 0.25}
+#     ),
+#     tune_config=tune.TuneConfig(
+#         metric="MAP",
+#         mode="max",
+#         search_alg=algo,
+#         num_samples=100
+#     ),
+#     param_space=search_space,
+#     run_config=train.RunConfig(
+#         stop={"training_iteration": 1}  # Limit the training iterations to 1
+#     )
+# )
+#
+# results = tuner.fit()
+# print("Best config is:", results.get_best_result().config)
 
-
-search_space = {"lr": tune.loguniform(1e-5, 1e-2)
-        ,"dim_in": tune.randint(16, 100),
-        "lookback": tune.randint(1,5),
-                "d_conv": tune.randint(2, 10),
-                "d_state": tune.randint(2, 50),
-                "dropout": tune.uniform(0.1, 0.5),
-                "weight_decay": tune.loguniform(1e-5, 1e-3)}
-
-# Create an Optuna search space
-algo = OptunaSearch(
-)
-
-
-tuner = tune.Tuner(  # ③
-    tune.with_resources(
-        tune.with_parameters(objective),
-        resources={"gpu": 0.25}
-    ),
-    tune_config=tune.TuneConfig(
-        metric="MAP",
-        mode="max",
-        search_alg=algo,
-        num_samples=100
-    ),
-    param_space=search_space,
-    run_config=train.RunConfig(
-        stop={"training_iteration": 1}  # Limit the training iterations to 1
-    )
-)
-
-results = tuner.fit()
-print("Best config is:", results.get_best_result().config)
+#{'lr': 2.6152417925517384e-05, 'dim_in': 71, 'lookback': 4, 'd_conv': 8, 'd_state': 6, 'dropout': 0.14669919601710057, 'weight_decay': 3.427957936022128e-05}

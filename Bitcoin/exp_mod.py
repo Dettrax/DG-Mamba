@@ -78,7 +78,8 @@ def init_logging_handler(exp_name):
 
 
 name = 'Results/Bitcoin'
-
+init_logging_handler(name)
+logging.debug(str(config))
 def check_if_gpu():
     if torch.cuda.is_available():
         device = 'cuda'
@@ -289,11 +290,6 @@ import pickle
 # with open('test_bit_otc_all_config-1/Eval_Results/saved_array/mu_as','rb') as f: mu_arr = pickle.load(f)
 # with open('test_bit_otc_all_config-1/Eval_Results/saved_array/sigma_as','rb') as f: sigma_arr = pickle.load(f)
 
-name_loaded = 'Results/Bitcoin'
-with open(name_loaded + '/Eval_Results/saved_array/mu_as', 'rb') as f: mu_arr = pickle.load(f)
-with open(name_loaded + '/Eval_Results/saved_array/sigma_as', 'rb') as f: sigma_arr = pickle.load(f)
-
-
 
 def unison_shuffled_copies(a, b, seed):
     assert len(a) == len(b)
@@ -379,62 +375,6 @@ def get_inf(data, mu_64, sigma_64, lookback,mult,device):
         count = count + 1
     return return_dict
 
-def get_inf_test(data, mu_64, sigma_64, lookback,mult,device):
-    return_dict = {}
-    #     for i in range (1, len(val_timestep) - 30):
-    count = 0
-    for ctr in range(95,109):
-
-        A_node = data[ctr][0].shape[0]
-        A = data[ctr][0]
-
-        if count > 0:
-            if A_node > A_prev_node:
-                A = A[:A_prev_node, :A_prev_node]
-
-            if True:
-
-                ones_edj = A.nnz
-                if A.shape[0] * mult <= (A.shape[0] - 1) * (A.shape[0] - 1):
-                    zeroes_edj = A.shape[0] * mult
-                else:
-                    zeroes_edj = (A.shape[0] - 1) * (A.shape[0] - 1) - A.nnz
-
-                tot = ones_edj + zeroes_edj
-
-                # Ensure A is in COO format
-                A_coo = A.tocoo() if not isinstance(A, coo_matrix) else A
-
-                # Get the pairs directly from the COO format properties
-                val_ones = list(zip(A_coo.row, A_coo.col))
-
-                val_ones = list(map(list, val_ones))
-
-                val_zeros = find_and_sample_zero_entries(A, zeroes_edj)
-
-                val_edges = np.row_stack((val_ones, val_zeros))
-
-                val_ground_truth = A[val_edges[:, 0], val_edges[:, 1]].A1
-
-                a, b = unison_shuffled_copies(val_edges, val_ground_truth, count)
-
-                if ctr >= 0:
-
-                    a_embed = np.array(mu_64[ctr - lookback])[a.astype(int)]
-
-                    a_embed_stacked = np.vstack(a_embed)  # This stacks all [0] and [1] vertically
-
-                    # Since we know every pair [0] and [1] are stacked sequentially, we can reshape:
-                    n_features = a_embed.shape[2]  # Number of features in each sub-array
-                    inp_clf_temp = a_embed_stacked.reshape(tot, 2 * n_features)
-
-                    inp_clf = torch.tensor(inp_clf_temp)
-
-                    inp_clf = inp_clf.to(device)
-                    return_dict[ctr] = [inp_clf,b,a]
-        A_prev_node = data[ctr][0].shape[0]
-        count = count + 1
-    return return_dict
 def get_MAP_avg(mu_arr, sigma_arr, lookback, data,device):
     MAP_l = []
     MRR_l = []
@@ -475,8 +415,7 @@ def get_MAP_avg(mu_arr, sigma_arr, lookback, data,device):
         mult = 10
         mult_test = 50
         num_epochs = 50
-        return_dict = get_inf(data, mu_64, sigma_64, lookback, mult)
-        return_dict_test = get_inf_test(data, mu_64, sigma_64, lookback, mult_test)
+        return_dict = get_inf(data, mu_64, sigma_64, lookback, mult,device)
         for epoch in range(num_epochs):
             #     for i in range (1, len(val_timestep) - 30):
             count = 0
@@ -513,9 +452,7 @@ def get_MAP_avg(mu_arr, sigma_arr, lookback, data,device):
 
                             l.backward()
                             optim.step()
-                            #                         MRR = get_MAP_e(out.cpu(), label.cpu(), val_edges)
 
-                            #                         logging.debug('Epoch: {}, Timestep: {}, Loss: {}, MAP: {}, MRR: {}'.format(epoch, ctr, l.item(), get_MAP_e(out.cpu(), label.cpu(), None),MRR))
 
 
                 A_prev_node = data[ctr][0].shape[0]
@@ -527,64 +464,90 @@ def get_MAP_avg(mu_arr, sigma_arr, lookback, data,device):
         MAP_time = []
         MRR_time = []
         time_ctr = 0
-        for epoch in range(num_epochs):
-            get_MAP_avg = []
-            get_MRR_avg = []
-            #     for i in range (70, len(val_timestep)):
-            count = 0
-            for ctr in range(95,109):
+    for epoch in range (num_epochs):
+        get_MAP_avg = []
+        get_MRR_avg = []
+    #     for i in range (70, len(val_timestep)):
+        count = 0
+        for ctr in range(95,109):
+
+            A_node = data[ctr][0].shape[0]
+            A = data[ctr][0]
+
+            if count > 0:
+                if A_node > A_prev_node:
+                    A = A[:A_prev_node,:A_prev_node]
+
+                if ctr >= 0:
+
+                    ones_edj = A.nnz
+                    if A.shape[0]*mult_test<=(A.shape[0]-1)*(A.shape[0]-1):
+                        zeroes_edj = A.shape[0]*mult_test
+                    else:
+                        zeroes_edj = (A.shape[0]-1)*(A.shape[0]-1) - A.nnz
+
+                    tot = ones_edj + zeroes_edj
+
+                    val_ones = list(set(zip(*A.nonzero())))
+                    val_ones = random.sample(val_ones, ones_edj)
+                    val_ones = [list(ele) for ele in val_ones] 
+                    val_zeros = sample_zero_n(A,zeroes_edj)
+                    val_zeros = [list(ele) for ele in val_zeros] 
+                    val_edges = np.row_stack((val_ones, val_zeros))
+
+                    val_ground_truth = A[val_edges[:, 0], val_edges[:, 1]].A1
+
+                    a, b = unison_shuffled_copies(val_edges,val_ground_truth, count)   
+
+                    if ctr > 0:
+
+                        a_embed = np.array(mu_64[ctr-(lookback+1)])[a.astype(int)]
+                        a_embed_sig = np.array(sigma_64[ctr-(lookback+1)])[a.astype(int)]
+
+                        classify.eval()
+
+                        inp_clf = []
+                        for d_id in range (tot):
+                            inp_clf.append(np.concatenate((a_embed[d_id][0], a_embed[d_id][1]), axis = 0))
+
+                        inp_clf = torch.tensor(np.asarray(inp_clf))
+
+                        inp_clf = inp_clf.to(device)
+                        with torch.no_grad():
+                            out = classify(inp_clf).squeeze()
 
 
-                if count > 0:
+                        weight = torch.tensor([0.05, 0.95]).to(device)
 
-                    if ctr >= 0:
 
-                        if ctr > 0:
+                        label = torch.tensor(np.asarray(b)).to(device)
 
-                            classify.eval()
+                        weight_ = weight[label.data.view(-1).long()].view_as(label)
 
-                            decompose = return_dict_test[ctr]
-                            inp_clf = decompose[0]
-                            b = decompose[1]
-                            a = decompose[2]
-                            with torch.no_grad():
-                                out = classify(inp_clf).squeeze()
 
-                            weight = torch.tensor([0.05, 0.95]).to(device)
 
-                            label = torch.tensor(np.asarray(b)).to(device)
+                        l = loss(out, label)
 
-                            weight_ = weight[label.data.view(-1).long()].view_as(label)
+                        l = l  * weight_
+                        l = l.mean()
 
-                            l = loss(out, label)
+                        
+                        MAP_val = get_MAP_e(out.cpu(), label.cpu(), None)
+                        get_MAP_avg.append(MAP_val)
 
-                            l = l * weight_
-                            l = l.mean()
 
-                            MAP_val = get_MAP_e(out.cpu(), label.cpu(), None)
-                            get_MAP_avg.append(MAP_val)
+                        MRR = get_MRR(out.cpu(), label.cpu(), np.transpose(a))
 
-                            #                     MRR = get_MAP_e(out.cpu(), label.cpu(), val_edges)
-                            #                     get_MRR_avg.append(MRR)
-
-                            #                     logging.debug('Epoch: {}, Timestep: {}, Loss: {}, MAP: {}, MRR: {}, Running Mean MAP: {},Running Mean MRR: {}'.format(epoch, ctr, l.item(), get_MAP_e(out.cpu(), label.cpu(), None), MRR,np.asarray(get_MAP_avg).mean(),np.asarray(get_MRR_avg).mean()))
-
-                            MRR = get_MRR(out.cpu(), label.cpu(), np.transpose(a))
-
-                            get_MRR_avg.append(MRR)
-
-                            try:
-                                if ctr == time_list[time_ctr]:
-                                    MAP_time.append(MAP_val)
-                                    MRR_time.append(MRR)
-                                    time_ctr = time_ctr + 1
-                            except:
-                                pass
-
-                            # logging.debug(
-                            #     'Epoch: {}, Timestep: {}, Loss: {}, MAP: {}, MRR: {}, Running Mean MAP: {}, Running Mean MRR: {}'.format(
-                            #         epoch, ctr, l.item(), get_MAP_e(out.cpu(), label.cpu(), None), MRR,
-                            #         np.asarray(get_MAP_avg).mean(), np.asarray(get_MRR_avg).mean()))
+                        get_MRR_avg.append(MRR)
+            
+                        try:
+                            if ctr == time_list[time_ctr]:
+                                MAP_time.append(MAP_val)
+                                MRR_time.append(MRR)
+                                time_ctr = time_ctr+1
+                        except:
+                            pass
+                        logging.debug('Epoch: {}, Timestep: {}, Loss: {}, MAP: {}, MRR: {}, Running Mean MAP: {}, Running Mean MRR: {}'.format(epoch, ctr, l.item(), get_MAP_e(out.cpu(), label.cpu(), None),MRR, np.asarray(get_MAP_avg).mean(),np.asarray(get_MRR_avg).mean()))
 
                 A_prev_node = data[ctr][0].shape[0]
                 count = count + 1
@@ -594,3 +557,10 @@ def get_MAP_avg(mu_arr, sigma_arr, lookback, data,device):
         return np.asarray(get_MAP_avg).mean(), np.asarray(get_MRR_avg).mean()
 
 
+name_loaded = 'Results/Bitcoin'
+with open(name_loaded+'/Eval_Results/saved_array/mu_as','rb') as f: mu_arr = pickle.load(f)
+with open(name_loaded+'/Eval_Results/saved_array/sigma_as','rb') as f: sigma_arr = pickle.load(f)
+
+data = dataset_bit_alpha('..')
+device = check_if_gpu()
+print(get_MAP_avg(mu_arr, sigma_arr, 2, data,device))

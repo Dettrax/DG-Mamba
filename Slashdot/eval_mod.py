@@ -490,7 +490,7 @@ def get_MAP_avg(mu_arr,sigma_arr,lookback,data,device):
             #     for i in range (70, len(val_timestep)):
             count = 0
 
-            for ctr in range(9, 11):
+            for ctr in range(11, 13):
 
                 A_node = data[ctr][0].shape[0]
                 A = data[ctr][0]
@@ -578,10 +578,10 @@ def get_MAP_avg(mu_arr,sigma_arr,lookback,data,device):
         return np.asarray(get_MAP_avg).mean() , np.asarray(get_MRR_avg).mean()
 
 
-
-data = dataset_mit('../')
-
-name_loaded = 'Results/Slashdot'
-with open(name_loaded+'/Eval_Results/saved_array/mu_as','rb') as f: mu_arr = pickle.load(f)
-with open(name_loaded+'/Eval_Results/saved_array/sigma_as','rb') as f: sigma_arr = pickle.load(f)
-print(get_MAP_avg(mu_arr,sigma_arr,lookback,data,device))
+#
+# data = dataset_mit('../')
+#
+# name_loaded = 'Results/Slashdot'
+# with open(name_loaded+'/Eval_Results/saved_array/mu_as','rb') as f: mu_arr = pickle.load(f)
+# with open(name_loaded+'/Eval_Results/saved_array/sigma_as','rb') as f: sigma_arr = pickle.load(f)
+# print(get_MAP_avg(mu_arr,sigma_arr,lookback,data,device))

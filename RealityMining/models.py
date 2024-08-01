@@ -174,10 +174,10 @@ def build_loss(triplets, scale_terms, mu, sigma, L, scale):
 
 
 class Graph2Gauss_Torch(nn.Module):
-    def __init__(self, dim_val, dim_attn, dim_in, dim_out, n_encoder_layers = 1, n_heads = 1, lookback = 1):
+    def __init__(self, dim_val, dim_attn, dim_in, dim_out,dropout, n_encoder_layers = 1, n_heads = 1, lookback = 1,lin_dim=256):
         super(Graph2Gauss_Torch, self).__init__()
-        self.D = 256
-
+        self.D = lin_dim
+        self.dropout = nn.Dropout(p=dropout)
         self.elu = nn.ELU()
         
         #Initiate encoder layers
@@ -197,8 +197,9 @@ class Graph2Gauss_Torch(nn.Module):
         e = self.encs[0](self.pos(self.enc_input_fc(input)))
         for enc in self.encs[1:]:
             e = enc(e)
-        
+        #take mean
         x = torch.tanh(self.out_fc(e.flatten(start_dim=1)))
+        x = self.dropout(x)
         mu = self.mu_fc(x)
         sigma = self.sigma_fc(x)
         sigma = self.elu(sigma) + 1 + 1e-14
