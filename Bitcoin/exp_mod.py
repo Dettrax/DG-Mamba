@@ -555,12 +555,3 @@ def get_MAP_avg(mu_arr, sigma_arr, lookback, data,device):
         MAP_l.append(MAP_time)
         MRR_l.append(MRR_time)
         return np.asarray(get_MAP_avg).mean(), np.asarray(get_MRR_avg).mean()
-
-
-name_loaded = 'Results/Bitcoin'
-with open(name_loaded+'/Eval_Results/saved_array/mu_as','rb') as f: mu_arr = pickle.load(f)
-with open(name_loaded+'/Eval_Results/saved_array/sigma_as','rb') as f: sigma_arr = pickle.load(f)
-
-data = dataset_bit_alpha('..')
-device = check_if_gpu()
-print(get_MAP_avg(mu_arr, sigma_arr, 2, data,device))
