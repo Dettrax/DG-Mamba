@@ -42,7 +42,7 @@ from torch.nn import (
     ReLU,
     Sequential,
 )
-
+import numpy as np
 from torch_geometric.nn import GINEConv, global_add_pool
 import inspect
 from typing import Any, Dict, Optional
@@ -251,13 +251,15 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
     print('Total parameters:', sum(p.numel() for p in model.parameters()))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-
+    # Define parameters
+    epochs = 50
+    # To store A matrices across timestamps and epochs
     val_losses = []
     train_loss = []
     test_loss = []
     best_MAP = 0
     best_model = None
-    for e in tqdm(range(100)):
+    for e in tqdm(range(epochs)):
         model.train()
         loss_step = []
         for i in range(lookback, 63):
@@ -272,69 +274,70 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
                 loss.backward()
                 clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
-        # val_loss_value = 0.0
-        # val_samples = 0
-        #
-        # with torch.no_grad():
-        #     model.eval()
-        #     for i in range(63, 72):
-        #         x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-        #         optimizer.zero_grad()
-        #         x = x.clone().detach().requires_grad_(False).to(device)
-        #         edge_index = edge_index.clone().detach().to(device)
-        #         _,mu, sigma = model(x,edge_index)
-        #         curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
-        #         val_loss_value += curr_val_loss
-        #
-        #         val_samples += 1
-        #     val_loss_value /= val_samples
-        # # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {val_loss_value}")
-        # val_losses.append(val_loss_value)
-        # train_loss.append(np.mean(np.stack(loss_step)))
-        # val_loss_value = 0.0
-        # val_samples = 0
-        # with torch.no_grad():
-        #     model.eval()
-        #     for i in range(72, 90):
-        #         x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-        #         optimizer.zero_grad()
-        #         x = x.clone().detach().requires_grad_(False).to(device)
-        #         edge_index = edge_index.clone().detach().to(device)
-        #         _, mu, sigma = model(x, edge_index)
-        #         curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
-        #         val_loss_value += curr_val_loss
-        #
-        #         val_samples += 1
-        #     val_loss_value /= val_samples
-        # test_loss.append(val_loss_value)
-        # # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} TEst Loss: {val_loss_value}")
-        # if e %10 ==0:
-        #     mu_timestamp = []
-        #     sigma_timestamp = []
-        #     with torch.no_grad():
-        #         model.eval()
-        #         for i in range(lookback, 90):
-        #             x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-        #             x = x.clone().detach().requires_grad_(True).to(device)
-        #             edge_index = edge_index.clone().detach().to(device)
-        #             _, mu, sigma = model(x, edge_index)
-        #             mu_timestamp.append(mu.cpu().detach().numpy())
-        #             sigma_timestamp.append(sigma.cpu().detach().numpy())
-        #
-        #     # Save mu and sigma matrices
-        #     name = 'Results/RealityMining'
-        #     save_sigma_mu = True
-        #     sigma_L_arr = []
-        #     mu_L_arr = []
-        #     if save_sigma_mu == True:
-        #         sigma_L_arr.append(sigma_timestamp)
-        #         mu_L_arr.append(mu_timestamp)
-        #     curr_MAP ,_ = get_MAP_avg(mu_L_arr, sigma_L_arr,lookback,data)
-        #     if curr_MAP > best_MAP:
-        #         best_MAP = curr_MAP
-        #         best_model = model
-        #         # torch.save(model.state_dict(), 'best_model.pth')
-        #         print("Best MAP: ",e, best_MAP,sep=" ")
+
+    val_loss_value = 0.0
+    val_samples = 0
+
+    with torch.no_grad():
+        model.eval()
+        for i in range(63, 72):
+            x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+            optimizer.zero_grad()
+            x = x.clone().detach().requires_grad_(False).to(device)
+            edge_index = edge_index.clone().detach().to(device)
+            _,mu, sigma = model(x,edge_index)
+            curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
+            val_loss_value += curr_val_loss
+
+            val_samples += 1
+        val_loss_value /= val_samples
+    # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {val_loss_value}")
+    val_losses.append(val_loss_value)
+    train_loss.append(np.mean(np.stack(loss_step)))
+    val_loss_value = 0.0
+    val_samples = 0
+    with torch.no_grad():
+        model.eval()
+        for i in range(72, 90):
+            x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+            optimizer.zero_grad()
+            x = x.clone().detach().requires_grad_(False).to(device)
+            edge_index = edge_index.clone().detach().to(device)
+            _, mu, sigma = model(x, edge_index)
+            curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
+            val_loss_value += curr_val_loss
+
+            val_samples += 1
+        val_loss_value /= val_samples
+    test_loss.append(val_loss_value)
+    # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} TEst Loss: {val_loss_value}")
+    if e %49 ==0:
+        mu_timestamp = []
+        sigma_timestamp = []
+        with torch.no_grad():
+            model.eval()
+            for i in range(lookback, 90):
+                x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+                x = x.clone().detach().requires_grad_(True).to(device)
+                edge_index = edge_index.clone().detach().to(device)
+                _, mu, sigma = model(x, edge_index)
+                mu_timestamp.append(mu.cpu().detach().numpy())
+                sigma_timestamp.append(sigma.cpu().detach().numpy())
+
+        # Save mu and sigma matrices
+        name = 'Results/RealityMining'
+        save_sigma_mu = True
+        sigma_L_arr = []
+        mu_L_arr = []
+        if save_sigma_mu == True:
+            sigma_L_arr.append(sigma_timestamp)
+            mu_L_arr.append(mu_timestamp)
+        curr_MAP ,_ = get_MAP_avg(mu_L_arr,lookback,data)
+        if curr_MAP > best_MAP:
+            best_MAP = curr_MAP
+            best_model = model
+            # torch.save(model.state_dict(), 'best_model.pth')
+            print("Best MAP: ",e, best_MAP,sep=" ")
 
     return best_model , val_losses , train_loss , test_loss
 
@@ -358,7 +361,7 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
 #
 
 
-lookback = 5
+lookback = 2
 walk = 16
 model , val_losses , loss_step , test_loss = optimise_mamba(lookback=lookback,dim_in=76,d_conv=9,d_state=6,dropout=0.4285,lr=0.000120,weight_decay=2.4530158734036414e-05,walk_length=walk)
 
