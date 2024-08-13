@@ -52,11 +52,11 @@ class Mamba(nn.Module):
 
     def forward(self, x):
         for layer in self.layers:
-            x = layer(x)
+            x,attn_mat = layer(x)
 
         x = self.norm_f(x)
 
-        return x
+        return x, attn_mat
 
     def step(self, x, caches):
         for i, layer in enumerate(self.layers):
@@ -73,8 +73,9 @@ class ResidualBlock(nn.Module):
         self.norm = RMSNorm(config.d_model)
 
     def forward(self, x):
-        output = self.mixer(self.norm(x)) + x
-        return output
+        output,attn_mat = self.mixer(self.norm(x))
+        output += x
+        return output , attn_mat
 
     def step(self, x, cache):
         output, cache = self.mixer.step(self.norm(x), cache)
@@ -131,14 +132,14 @@ class MambaBlock(nn.Module):
         x = x.transpose(1, 2)
 
         x = F.silu(x)
-        y = self.ssm(x)
+        y , AttnVecorOverCLS = self.ssm(x)
 
         z = F.silu(z)
 
         output = y * z
         output = self.out_proj(output)
 
-        return output
+        return output , AttnVecorOverCLS
 
     def ssm(self, x):
         A = -torch.exp(self.A_log.float())
@@ -150,12 +151,43 @@ class MambaBlock(nn.Module):
         delta = F.softplus(self.dt_proj(delta))
 
         if self.config.pscan:
-            y = self.selective_scan(x, delta, A, B, C, D)
+            y , AttnVecorOverCLS = self.selective_scan(x, delta, A, B, C, D)
         else:
             y = self.selective_scan_seq(x, delta, A, B, C, D)
 
-        return y
+        return y , AttnVecorOverCLS
 
+    def compute_middle_attn_vector(self,dA,dB, C, x_shape):
+        C = C.reshape(C.shape[0],1,C.shape[2],C.shape[1])
+        AttnVecorOverCLS = torch.zeros(x_shape).to(dA.device)  # BHL: L vectors per batch and channel
+        AttnVecorOverCLS = AttnVecorOverCLS.permute(0, 2, 1)
+        cls_pos = x_shape[1] - 1
+        for t in range(cls_pos):
+            curr_C = C[:, :, :, cls_pos]
+            currA = torch.ones(dA.shape[0], dA.shape[2], dA.shape[3]).to(dA.device)
+            if t < (cls_pos - 1):
+                for i in range(cls_pos - 1 - t):
+                    currA = currA * dA[:, cls_pos - 1 - i, :, :]
+            currB = dB[:, t, :, :]
+            AttnVecorOverCLS[:, :, t] = torch.sum(curr_C * currA * currB, axis=-1)
+        return AttnVecorOverCLS
+
+    def compute_attn_matrix_fn(self,dA,dB, C, x_shape, dtype=torch.float16):
+        C = C.reshape(C.shape[0],1,C.shape[2],C.shape[1])
+        AttnMatrixOverCLS = torch.zeros((x_shape[0], x_shape[2], x_shape[1], x_shape[1]), requires_grad=True).to(
+            dtype).to(dA.device)  # BHLL: L vectors per batch and channel
+
+        for r in range(x_shape[1]):
+            for c in range(r + 1):
+                curr_C = C[:, :, :, r]
+                currA = torch.ones((dA.shape[0], dA.shape[2], dA.shape[3]), requires_grad=True, dtype=dtype).to(
+                    dA.device)
+                if c < r:
+                    for i in range(r - c):
+                        currA = currA * dA[:, r - i, :, :]
+                currB = dB[:, c, :, :]
+                AttnMatrixOverCLS[:, :, r, c] = torch.sum(curr_C * currA * currB, axis=-1)
+        return AttnMatrixOverCLS
     def selective_scan(self, x, delta, A, B, C, D):
         deltaA = torch.exp(delta.unsqueeze(-1) * A)
         deltaB = delta.unsqueeze(-1) * B.unsqueeze(2)
@@ -167,8 +199,8 @@ class MambaBlock(nn.Module):
         y = (hs @ C.unsqueeze(-1)).squeeze(3)
 
         y = y + D * x
-
-        return y
+        AttnVecorOverCLS = self.compute_attn_matrix_fn(deltaA,deltaB, C, y.shape)
+        return y , AttnVecorOverCLS
 
     def selective_scan_seq(self, x, delta, A, B, C, D):
         _, L, _ = x.shape
