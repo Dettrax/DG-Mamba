@@ -18,8 +18,9 @@ def a_norm(Q, K):
 def attention(Q, K, V):
     #Attention(Q, K, V) = norm(QK)V
     a = a_norm(Q, K) #(batch_size, dim_attn, seq_length)
-    
-    return  torch.matmul(a,  V) #(batch_size, seq_length, seq_length)
+    a = torch.tril(a) #Lower triangular matrix
+    attn_weights = a
+    return  torch.matmul(a,  V),attn_weights #(batch_size, seq_length, seq_length)
 
 class AttentionBlock(torch.nn.Module):
     def __init__(self, dim_val, dim_attn):
@@ -50,15 +51,18 @@ class MultiHeadAttentionBlock(torch.nn.Module):
         
     def forward(self, x, kv = None):
         a = []
+        attn_heads =[]
         for h in self.heads:
-            a.append(h(x, kv = kv))
+            out,attn_weights = h(x, kv = kv)
+            attn_heads.append(attn_weights)
+            a.append(out)
             
         a = torch.stack(a, dim = -1) #combine heads
         a = a.flatten(start_dim = 2) #flatten all head outputs
         
         x = self.fc(a)
         
-        return x
+        return x, attn_heads
     
 class Value(torch.nn.Module):
     def __init__(self, dim_input, dim_val):
@@ -137,13 +141,13 @@ class EncoderLayer(torch.nn.Module):
         self.norm2 = nn.LayerNorm(dim_val)
     
     def forward(self, x):
-        a = self.attn(x)
+        a,attn_weights = self.attn(x)
         x = self.norm1(x + a)
         
         a = self.fc1(F.elu(self.fc2(x)))
         x = self.norm2(x + a)
         
-        return x
+        return x,attn_weights
 
 
     
@@ -174,10 +178,10 @@ def build_loss(triplets, scale_terms, mu, sigma, L, scale):
 
 
 class Graph2Gauss_Torch(nn.Module):
-    def __init__(self, dim_val, dim_attn, dim_in, dim_out,dropout, n_encoder_layers = 1, n_heads = 1, lookback = 1,lin_dim=256):
+    def __init__(self, dim_val, dim_attn, dim_in, dim_out, n_encoder_layers = 1, n_heads = 1, lookback = 1):
         super(Graph2Gauss_Torch, self).__init__()
-        self.D = lin_dim
-        self.dropout = nn.Dropout(p=dropout)
+        self.D = 256
+
         self.elu = nn.ELU()
         
         #Initiate encoder layers
@@ -194,14 +198,13 @@ class Graph2Gauss_Torch(nn.Module):
         self.mu_fc  = nn.Linear(self.D, dim_out)
 
     def forward(self, input):
-        e = self.encs[0](self.pos(self.enc_input_fc(input)))
+        e , attn_weights = self.encs[0](self.pos(self.enc_input_fc(input)))
         for enc in self.encs[1:]:
-            e = enc(e)
-        #take mean
+            e,attn_weights = enc(e)
+        
         x = torch.tanh(self.out_fc(e.flatten(start_dim=1)))
-        x = self.dropout(x)
         mu = self.mu_fc(x)
         sigma = self.sigma_fc(x)
         sigma = self.elu(sigma) + 1 + 1e-14
 
-        return x, mu, sigma
+        return x, mu, sigma,attn_weights

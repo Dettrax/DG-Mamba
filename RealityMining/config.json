@@ -1,5 +1,5 @@
 {"K": 2,
-"lookback":2,
+"lookback":4,
 "p_test": 0.00,
 "p_val": 0.1,
 "p_nodes": 0.0,

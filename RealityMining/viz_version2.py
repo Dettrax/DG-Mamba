@@ -1,3 +1,11 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Aug 13 14:45:18 2024
+
+@author: ap2934
+"""
+
 # This code creates and saves embedding with - transformer + G2G model.
 # We have used some of the functionalities from Xu, M., Singh, A.V. &
 # Karniadakis G.K. "DynG2G: An efficient Stochastic Graph Embedding
@@ -172,9 +180,6 @@ def build_loss(triplets, scale_terms, mu, sigma, L, scale):
 
 
 import torch
-import torch.nn.functional as F
-from torch_geometric.nn import MessagePassing
-from torch_geometric.utils import add_self_loops, degree
 
 
 class MambaG2G(torch.nn.Module):
@@ -191,7 +196,7 @@ class MambaG2G(torch.nn.Module):
         self.sigma_fc = nn.Linear(self.D, dim_out)
         self.mu_fc = nn.Linear(self.D, dim_out)
 
-    def forward(self, input,edge_index):
+    def forward(self, input,edge_index): # 96,5,96
         # e = self.enc_input_fc(input)
         e = self.mamba(input)
         e = e.mean(dim=1)  # Average pooling to maintain the expected shape
@@ -203,7 +208,7 @@ class MambaG2G(torch.nn.Module):
         sigma = self.sigma_fc(x)
         sigma = self.elu(sigma) + 1 + 1e-14
 
-        return x, mu, sigma
+        return x, mu, sigma # 96,96,5,5
 
 
 def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_length):
@@ -223,7 +228,7 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     # Define parameters
-    epochs = 50
+    epochs = 5
 
     A_matrices = []
     for e in tqdm(range(epochs)):
@@ -247,29 +252,9 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
 
 lookback = 4
 walk = 16
-model,dataset = optimise_mamba(lookback=lookback,dim_in=76,d_conv=9,d_state=8,dropout=0.4285,lr=0.000120,weight_decay=2.4530158734036414e-05,walk_length=walk)
+model,dataset = optimise_mamba(lookback=lookback,dim_in=76,d_conv=3,d_state=12,dropout=0.4285,lr=0.000120,weight_decay=2.4530158734036414e-05,walk_length=walk)
 
-mu_timestamp = []
-sigma_timestamp = []
-with torch.no_grad():
-    model.eval()
-    for i in range(lookback, 90):
-        x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-        x = x.clone().detach().requires_grad_(True).to(device)
-        edge_index = edge_index.clone().detach().to(device)
-        _, mu, sigma,attn_mat = model(x, edge_index)
-        mu_timestamp.append(mu.cpu().detach().numpy())
-        sigma_timestamp.append(sigma.cpu().detach().numpy())
 
-name = 'Results/RealityMining'
-save_sigma_mu = True
-sigma_L_arr = []
-mu_L_arr = []
-if save_sigma_mu == True:
-    sigma_L_arr.append(sigma_timestamp)
-    mu_L_arr.append(mu_timestamp)
-curr_MAP ,_ = get_MAP_avg(mu_L_arr,lookback,data)
-print(curr_MAP)
 
 
 import matplotlib.pyplot as plt
@@ -286,56 +271,54 @@ node = 6  # Node index 6 (0-based index is 5)
 vmin = float('inf')
 vmax = float('-inf')
 
+mu_timestamp = []
+sigma_timestamp=[]
+attn_weights_per_timestamps = []
+for i in tqdm(range(lookback,90)):
+    with torch.no_grad():
+        model.eval()
+        x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[5]
+        x = x.clone().detach().requires_grad_(False).to(device)
+        edge_index = edge_index.clone().detach().to(device)
+        _, _, _, = model(x, edge_index)
 
-for timestamp in timestamps:
-    x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[timestamp]
-    x = x.clone().detach().requires_grad_(True).to(device)
-    edge_index = edge_index.clone().detach().to(device)
-    _, _, _,attn_mat = model(x, edge_index)
-    selected_node_attn = attn_mat[node-1].cpu().detach().numpy()  # Shape [96, 5, 5]
-    attn_sum_matrix = selected_node_attn.sum(axis=0)  # Shape [5, 5]
-    vmin = min(vmin, attn_sum_matrix.min())
-    vmax = max(vmax, attn_sum_matrix.max())
+    # Extract and normalize attention matrices
+    attn_matrix_a = model.mamba.attn_matrix_a.abs()
+    attn_matrix_b = model.mamba.attn_matrix_b.abs()
+    normalize_attn_mat = lambda attn_mat : (attn_mat.abs() - torch.min(attn_mat.abs())) / (torch.max(attn_mat.abs()) - torch.min(attn_mat.abs()))
+    attn_matrix_a_normalize = normalize_attn_mat(attn_matrix_a)
+    attn_matrix_b_normalize = normalize_attn_mat(attn_matrix_b)
+    attn_weights_per_timestamps.append(attn_matrix_a[5].mean(dim=0).cpu().detach().numpy())
 
-# Number of subplots per row
-subplots_per_row = 4
-n_rows = (len(timestamps) + subplots_per_row - 1) // subplots_per_row  # Calculate number of rows
 
-# Create a figure with subplots
-fig, axes = plt.subplots(n_rows, subplots_per_row, figsize=(15, 5 * n_rows))
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
 
-# Flatten the axes array for easy indexing
+# Assuming attn_matrices is a list of 63 attention matrices, each of shape 5x5
+attn_matrices = attn_weights_per_timestamps  # Replace with your actual attention matrices
+
+# Calculate the global min and max values for consistent color range
+vmin = min(attn_mat.min() for attn_mat in attn_matrices)
+vmax = max(attn_mat.max() for attn_mat in attn_matrices)
+
+# Create a figure with subplots, max 5 plots per row
+n_rows = (len(attn_matrices) + 4) // 5  # Calculate the number of rows needed
+fig, axes = plt.subplots(n_rows, 5, figsize=(30, n_rows * 6))
+
+# Flatten the axes array for easy iteration
 axes = axes.flatten()
 
-for i, timestamp in enumerate(timestamps):
-    x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[timestamp]
-    x = x.clone().detach().requires_grad_(True).to(device)
-    edge_index = edge_index.clone().detach().to(device)
-    _, _, _,attn_mat = model(x, edge_index)
-    # Select the attention matrix for the specific node
-    selected_node_attn = attn_mat[node-1].cpu().detach().numpy()  # Shape [96, 5, 5]
+# Visualize each attention matrix as a heatmap in its respective subplot
+for i, attn_mat in enumerate(attn_matrices):
+    sns.heatmap(attn_mat, annot=True, cmap='viridis', cbar=True, ax=axes[i], vmin=vmin, vmax=vmax)
+    axes[i].set_title(f'Heatmap {lookback+i+1}')
 
-    # Sum along the feature dimension (dim 0) to get a [5, 5] matrix
-    attn_sum_matrix = selected_node_attn.sum(axis=0)  # Shape [5, 5]
-
-    # Ensure attn_sum_matrix is correctly shaped as [5, 5]
-    assert attn_sum_matrix.shape == (5, 5), f"Expected shape (5, 5), but got {attn_sum_matrix.shape}"
-
-    # Generate the heatmap for the specific timestamp
-    sns.heatmap(attn_sum_matrix, cmap='viridis', annot=True, fmt=".2f", cbar=True,
-                xticklabels=[f'Token {i+1}' for i in range(5)],
-                yticklabels=[f'Token {i+1}' for i in range(5)],
-                ax=axes[i], vmin=vmin, vmax=vmax)
-
-    axes[i].set_xlabel('Influenced Token')
-    axes[i].set_ylabel('Influencing Token')
-    axes[i].set_title(f'Timestamp {timestamp}')
-
-# Remove any unused subplots
-for j in range(i+1, len(axes)):
+# Hide any unused subplots
+for j in range(len(attn_matrices), len(axes)):
     fig.delaxes(axes[j])
 
-# Adjust layout
+# Display the figure
 plt.tight_layout()
-plt.suptitle(f'Token-to-Token Influence Heatmap for Node {node} Across Timestamps', y=1.05)
 plt.show()
+

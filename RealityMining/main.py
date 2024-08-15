@@ -26,14 +26,14 @@ n_encoder_layers = 1
 
 f = open("config.json")
 config = json.load(f)
-lookback = config["lookback"]
+lookback = 4
 
 #Check GPU availability
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(device)
 
 #init network and optimizer
-t = Graph2Gauss_Torch(dim_val, dim_attn, dim_in, dim_out, n_encoder_layers, n_heads, lookback)
+t = Graph2Gauss_Torch(dim_val, dim_attn, dim_in, dim_out, n_encoder_layers, n_heads, lookback=lookback)
 optimizer = torch.optim.Adam(t.parameters(), lr=lr)
 sched = ScheduledOptim(optimizer,lr_mul = 0.01, d_model = 256, n_warmup_steps = 100)
 t.to(device)
@@ -105,7 +105,7 @@ for e in tqdm(range(epochs)):
         triplet, scale = to_triplets(sample_all_hops(hop_dict[i]),scale_terms_dict[i])
         sched.zero_grad()
         #optimizer.zero_grad()
-        _,mu,sigma = t(train_data[i])
+        _,mu,sigma,attn_weights = t(train_data[i])
         #loss = build_loss(triplet_dict[i], scale_dict[i],mu,sigma,64, scale = False)
         loss = build_loss(triplet, scale, mu, sigma, 64, scale = False)
         loss_list.append(loss.cpu().detach().numpy())
@@ -113,12 +113,12 @@ for e in tqdm(range(epochs)):
         loss.backward()
         sched.step_and_update_lr()
         #optimizer.step()
-    val_mainlist.append(val_loss(t))
-    loss_mainlist.append(np.mean(loss_list))
-    print(f"Epoch: {e}, Average loss: {np.mean(loss_list)}, Val loss: {val_mainlist[-1]}" )
-    if e%10==0:
-        name = 'model' + str(e)+'.pth'
-        torch.save(t.state_dict(), name)
+    # val_mainlist.append(val_loss(t))
+    # loss_mainlist.append(np.mean(loss_list))
+    # print(f"Epoch: {e}, Average loss: {np.mean(loss_list)}, Val loss: {val_mainlist[-1]}" )
+    # if e%10==0:
+    #     name = 'model' + str(e)+'.pth'
+    #     torch.save(t.state_dict(), name)
 
 
 plt.figure()
@@ -133,12 +133,83 @@ plt.savefig("Loss.png")
 #Model eval
 mu_timestamp = []
 sigma_timestamp=[]
+attn_weights_per_timestamps = []
 for i in range(lookback,90):
-    _,mu,sigma = t(torch.tensor(dataset[i],dtype = torch.float32).to(device))
-    mu_timestamp.append(mu.cpu().detach().numpy())
-    sigma_timestamp.append(sigma.cpu().detach().numpy())
-    
+    with torch.no_grad():
+        t.eval()
+        _,mu,sigma,attn_weights = t(torch.tensor(dataset[i],dtype = torch.float32).to(device))
+        mu_timestamp.append(mu.cpu().detach().numpy())
+        sigma_timestamp.append(sigma.cpu().detach().numpy())
+        attn_weights_per_timestamp = attn_weights[0][5].cpu().detach().numpy()
+        attn_weights_per_timestamps.append(attn_weights_per_timestamp)
 
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+import pickle
+
+# Load the list from the file
+with open('attn_mamba.pkl', 'rb') as f:
+    attn_mamba = pickle.load(f)
+
+# Assuming attn_matrix is a list of attention matrices
+attn_matrix = attn_weights_per_timestamps  # Replace with your actual attention matrices
+
+# Ensure both lists have the same length
+assert len(attn_mamba) == len(attn_matrix), "Both lists must have the same length"
+
+# Calculate the global min and max values for consistent color range
+vmin = min(min(attn_mat.min() for attn_mat in attn_mamba), min(attn_mat.min() for attn_mat in attn_matrix))
+vmax = max(max(attn_mat.max() for attn_mat in attn_mamba), max(attn_mat.max() for attn_mat in attn_matrix))
+
+# Create a figure with subplots, 2 plots per row (one for each type of attention matrix)
+n_timestamps = len(attn_mamba)
+n_rows = (n_timestamps + 1) // 2  # Calculate the number of rows needed
+fig, axes = plt.subplots(n_rows, 4, figsize=(24, n_rows * 6))
+
+# Flatten the axes array for easy iteration
+axes = axes.flatten()
+
+# Visualize each pair of attention matrices as heatmaps in their respective subplots
+for i in range(n_timestamps):
+    sns.heatmap(attn_mamba[i], annot=True, cmap='viridis', cbar=True, ax=axes[2 * i], vmin=vmin, vmax=vmax)
+    axes[2 * i].set_title(f'Mamba Heatmap {lookback+i + 1}')
+
+    sns.heatmap(attn_matrix[i], annot=True, cmap='viridis', cbar=True, ax=axes[2 * i + 1], vmin=vmin, vmax=vmax)
+    axes[2 * i + 1].set_title(f'Transformer Heatmap {lookback+i + 1}')
+
+# Hide any unused subplots
+for j in range(2 * n_timestamps, len(axes)):
+    fig.delaxes(axes[j])
+
+# Display the figure
+plt.tight_layout()
+plt.show()
+#
+# # Calculate the global min and max values for consistent color range
+# vmin = min(attn_mat.min() for attn_mat in attn_matrices)
+# vmax = max(attn_mat.max() for attn_mat in attn_matrices)
+#
+# # Create a figure with subplots, max 5 plots per row
+# n_rows = (len(attn_matrices) + 4) // 5  # Calculate the number of rows needed
+# fig, axes = plt.subplots(n_rows, 5, figsize=(30, n_rows * 6))
+#
+# # Flatten the axes array for easy iteration
+# axes = axes.flatten()
+
+# # Visualize each attention matrix as a heatmap in its respective subplot
+# for i, attn_mat in enumerate(attn_matrices):
+#     sns.heatmap(attn_mat, annot=True, cmap='viridis', cbar=True, ax=axes[i], vmin=vmin, vmax=vmax)
+#     axes[i].set_title(f'Heatmap {lookback+i+1}')
+#
+# # Hide any unused subplots
+# for j in range(len(attn_matrices), len(axes)):
+#     fig.delaxes(axes[j])
+#
+# # Display the figure
+# plt.tight_layout()
+# plt.show()
 
 #Save mu and sigma matrices    
 name = 'Results/RealityMining'
@@ -154,3 +225,20 @@ if save_sigma_mu == True:
         os.makedirs(name+'/Eval_Results/saved_array')
     with open(name+'/Eval_Results/saved_array/sigma_as','wb') as f: pickle.dump(sigma_L_arr, f)
     with open(name+'/Eval_Results/saved_array/mu_as','wb') as f: pickle.dump(mu_L_arr, f)
+
+
+from eval_mod import get_MAP_avg
+import time
+start = time.time()
+MAPS = []
+MRR = []
+for i in tqdm(range(2)):
+    curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, lookback,data)
+    MAPS.append(curr_MAP)
+    MRR.append(curr_MRR)
+#print mean and std of map and mrr
+print("Mean MAP: ", np.mean(MAPS))
+print("Mean MRR: ", np.mean(MRR))
+print("Std MAP: ", np.std(MAPS))
+print("Std MRR: ", np.std(MRR))
+print("Time taken: ", time.time() - start)

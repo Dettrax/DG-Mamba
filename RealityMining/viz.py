@@ -283,55 +283,79 @@ vmin = float('inf')
 vmax = float('-inf')
 
 
-for timestamp in timestamps:
-    x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[timestamp]
-    x = x.clone().detach().requires_grad_(True).to(device)
-    edge_index = edge_index.clone().detach().to(device)
-    _, _, _,attn_mat = model(x, edge_index)
-    selected_node_attn = attn_mat[node-1].cpu().detach().numpy()  # Shape [96, 5, 5]
-    attn_sum_matrix = selected_node_attn.sum(axis=0)  # Shape [5, 5]
-    vmin = min(vmin, attn_sum_matrix.min())
-    vmax = max(vmax, attn_sum_matrix.max())
+# for timestamp in timestamps:
+#     x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[timestamp]
+#     x = x.clone().detach().requires_grad_(True).to(device)
+#     edge_index = edge_index.clone().detach().to(device)
+#     _, _, _,attn_mat = model(x, edge_index)
+#     selected_node_attn = attn_mat[node-1].cpu().detach().numpy()  # Shape [96, 5, 5]
+#     attn_sum_matrix = selected_node_attn.sum(axis=0)  # Shape [5, 5]
+#     vmin = min(vmin, attn_sum_matrix.min())
+#     vmax = max(vmax, attn_sum_matrix.max())
+#
+# # Number of subplots per row
+# subplots_per_row = 4
+# n_rows = (len(timestamps) + subplots_per_row - 1) // subplots_per_row  # Calculate number of rows
+#
+# # Create a figure with subplots
+# fig, axes = plt.subplots(n_rows, subplots_per_row, figsize=(15, 5 * n_rows))
+#
+# # Flatten the axes array for easy indexing
+# axes = axes.flatten()
+#
+# for i, timestamp in enumerate(timestamps):
+#     x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[timestamp]
+#     x = x.clone().detach().requires_grad_(True).to(device)
+#     edge_index = edge_index.clone().detach().to(device)
+#     _, _, _,attn_mat = model(x, edge_index) # 96,96,5,5
+#     # Select the attention matrix for the specific node
+#     selected_node_attn = attn_mat[node-1].cpu().detach().numpy()  # Shape [96, 5, 5]
+#
+#     # Sum along the feature dimension (dim 0) to get a [5, 5] matrix
+#     attn_sum_matrix = selected_node_attn.sum(axis=0)/96  # Shape [5, 5]
+#
+#     # Ensure attn_sum_matrix is correctly shaped as [5, 5]
+#     assert attn_sum_matrix.shape == (5, 5), f"Expected shape (5, 5), but got {attn_sum_matrix.shape}"
+#
+#     # Generate the heatmap for the specific timestamp
+#     sns.heatmap(attn_sum_matrix, cmap='viridis', annot=True, fmt=".2f", cbar=True,
+#                 xticklabels=[f'Token {i+1}' for i in range(5)],
+#                 yticklabels=[f'Token {i+1}' for i in range(5)],
+#                 ax=axes[i], vmin=vmin/96, vmax=vmax/96)
+#
+#     axes[i].set_xlabel('Influenced Token')
+#     axes[i].set_ylabel('Influencing Token')
+#     axes[i].set_title(f'Timestamp {timestamp}')
+#
+# # Remove any unused subplots
+# for j in range(i+1, len(axes)):
+#     fig.delaxes(axes[j])
+#
+# # Adjust layout
+# plt.tight_layout()
+# plt.suptitle(f'Token-to-Token Influence Heatmap for Node {node} Across Timestamps', y=1.05)
+# plt.show()
+#
 
-# Number of subplots per row
-subplots_per_row = 4
-n_rows = (len(timestamps) + subplots_per_row - 1) // subplots_per_row  # Calculate number of rows
 
-# Create a figure with subplots
-fig, axes = plt.subplots(n_rows, subplots_per_row, figsize=(15, 5 * n_rows))
+x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[5]
+x = x.clone().detach().requires_grad_(True).to(device)
+edge_index = edge_index.clone().detach().to(device)
+_, _, _,attn_mat = model(x, edge_index)
 
-# Flatten the axes array for easy indexing
-axes = axes.flatten()
+temp = attn_mat.abs()
+temp_flip = attn_mat.flip([-1,-2]).abs()
 
-for i, timestamp in enumerate(timestamps):
-    x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[timestamp]
-    x = x.clone().detach().requires_grad_(True).to(device)
-    edge_index = edge_index.clone().detach().to(device)
-    _, _, _,attn_mat = model(x, edge_index) # 96,96,5,5
-    # Select the attention matrix for the specific node
-    selected_node_attn = attn_mat[node-1].cpu().detach().numpy()  # Shape [96, 5, 5]
+normalize_attn_mat = lambda attn_mat : (attn_mat.abs() - torch.min(attn_mat.abs())) / (torch.max(attn_mat.abs()) - torch.min(attn_mat.abs()))
+attn_matrix_a_normalize = normalize_attn_mat(temp)
+attn_matrix_b_normalize = normalize_attn_mat(temp_flip)
 
-    # Sum along the feature dimension (dim 0) to get a [5, 5] matrix
-    attn_sum_matrix = selected_node_attn.sum(axis=0)/96  # Shape [5, 5]
+# Plot each attention matrix
+fig, axs = plt.subplots(1, 6, figsize=(10,10))
+for i in range(3):
+    axs[i].imshow(temp.cpu().detach().numpy()[0, 5+i, :, :])
+    axs[i].axis('off')
+    axs[i+3].imshow(temp_flip.cpu().detach().numpy()[0, 5+i, :, :])
+    axs[i+3].axis('off')
 
-    # Ensure attn_sum_matrix is correctly shaped as [5, 5]
-    assert attn_sum_matrix.shape == (5, 5), f"Expected shape (5, 5), but got {attn_sum_matrix.shape}"
-
-    # Generate the heatmap for the specific timestamp
-    sns.heatmap(attn_sum_matrix, cmap='viridis', annot=True, fmt=".2f", cbar=True,
-                xticklabels=[f'Token {i+1}' for i in range(5)],
-                yticklabels=[f'Token {i+1}' for i in range(5)],
-                ax=axes[i], vmin=vmin/96, vmax=vmax/96)
-
-    axes[i].set_xlabel('Influenced Token')
-    axes[i].set_ylabel('Influencing Token')
-    axes[i].set_title(f'Timestamp {timestamp}')
-
-# Remove any unused subplots
-for j in range(i+1, len(axes)):
-    fig.delaxes(axes[j])
-
-# Adjust layout
-plt.tight_layout()
-plt.suptitle(f'Token-to-Token Influence Heatmap for Node {node} Across Timestamps', y=1.05)
 plt.show()
