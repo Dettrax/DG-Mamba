@@ -11,15 +11,17 @@ import math
 def a_norm(Q, K):
     m = torch.matmul(Q, K.transpose(2,1).float())
     m /= torch.sqrt(torch.tensor(Q.shape[-1]).float())
-    
+    m = torch.tril(m) #Lower triangular matrix
+    #assign zero values to -inf
+    m[m == 0] = float('-inf')
     return torch.softmax(m , -1)
 
 
 def attention(Q, K, V):
     #Attention(Q, K, V) = norm(QK)V
     a = a_norm(Q, K) #(batch_size, dim_attn, seq_length)
-    
-    return  torch.matmul(a,  V) #(batch_size, seq_length, seq_length)
+    attn_weights = a
+    return  torch.matmul(a,  V),attn_weights #(batch_size, seq_length, seq_length)
 
 class AttentionBlock(torch.nn.Module):
     def __init__(self, dim_val, dim_attn):
@@ -46,19 +48,21 @@ class MultiHeadAttentionBlock(torch.nn.Module):
         self.heads = nn.ModuleList(self.heads)
         
         self.fc = nn.Linear(n_heads * dim_val, dim_val, bias = False)
-                      
-        
-    def forward(self, x, kv = None):
+
+    def forward(self, x, kv=None):
         a = []
+        attn_heads = []
         for h in self.heads:
-            a.append(h(x, kv = kv))
-            
-        a = torch.stack(a, dim = -1) #combine heads
-        a = a.flatten(start_dim = 2) #flatten all head outputs
-        
+            out, attn_weights = h(x, kv=kv)
+            attn_heads.append(attn_weights)
+            a.append(out)
+
+        a = torch.stack(a, dim=-1)  # combine heads
+        a = a.flatten(start_dim=2)  # flatten all head outputs
+
         x = self.fc(a)
-        
-        return x
+
+        return x, attn_heads
     
 class Value(torch.nn.Module):
     def __init__(self, dim_input, dim_val):
@@ -135,15 +139,15 @@ class EncoderLayer(torch.nn.Module):
         
         self.norm1 = nn.LayerNorm(dim_val)
         self.norm2 = nn.LayerNorm(dim_val)
-    
+
     def forward(self, x):
-        a = self.attn(x)
+        a, attn_weights = self.attn(x)
         x = self.norm1(x + a)
-        
+
         a = self.fc1(F.elu(self.fc2(x)))
         x = self.norm2(x + a)
-        
-        return x
+
+        return x, attn_weights
 
 
     
@@ -194,13 +198,13 @@ class Graph2Gauss_Torch(nn.Module):
         self.mu_fc  = nn.Linear(self.D, dim_out)
 
     def forward(self, input):
-        e = self.encs[0](self.pos(self.enc_input_fc(input)))
+        e, attn_weights = self.encs[0](self.pos(self.enc_input_fc(input)))
         for enc in self.encs[1:]:
-            e = enc(e)
-        
-        x = self.out_fc(e.flatten(start_dim=1))
+            e, attn_weights = enc(e)
+
+        x = torch.tanh(self.out_fc(e.flatten(start_dim=1)))
         mu = self.mu_fc(x)
         sigma = self.sigma_fc(x)
         sigma = self.elu(sigma) + 1 + 1e-14
 
-        return x, mu, sigma
+        return x, mu, sigma, attn_weights

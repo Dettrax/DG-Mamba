@@ -160,7 +160,7 @@ def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay)
     train_loss = []
     test_loss = []
     best_MAP = 0
-    for e in tqdm(range(100)):
+    for e in tqdm(range(50)):
         model.train()
         loss_step = []
         for i in range(lookback, 35):
@@ -179,7 +179,7 @@ def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay)
         val_losses.append(val_loss(model,dataset))
         train_loss.append(np.mean(loss_step))
 
-        if e%5 == 0:
+        if e%49 == 0:
                 # if e %5 ==0:
             mu_timestamp = []
             sigma_timestamp = []
@@ -207,7 +207,7 @@ def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay)
             print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {np.mean(np.stack(val_losses))} Best MAP: {best_MAP}")
     return model , val_losses , train_loss , test_loss
 
-lookback = 5
+lookback = 2
 #{'lr': 0.0030654227230925636, 'lin_dim': 47, 'd_conv': 6, 'lookback': 4, 'd_state': 25, 'dropout': 0.3725448646977555, 'weight_decay': 1.02596357976919e-05}
 model , val_losses , train_loss , test_loss = optimise_mamba(data,lookback,47,6,25,0.3725448646977555, 0.0030654227230925636, 1.02596357976919e-05)
 

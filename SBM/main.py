@@ -93,37 +93,25 @@ def val_loss(t):
         l.append(val_l.cpu().detach().numpy())
     return np.mean(l)
 
+from tqdm import tqdm
 
 epochs = 100
 loss_mainlist = []
 val_mainlist = []
-for e in range(epochs):
+for e in tqdm(range(epochs)):
     loss_list = []
     for i in range(lookback,35):
         triplet, scale = to_triplets(sample_all_hops(hop_dict[i]),scale_terms_dict[i])
         optimizer.zero_grad()
-        _,mu,sigma = t(train_data[i])
+        _,mu,sigma,attn_weights = t(train_data[i])
         #loss = build_loss(triplet_dict[i], scale_dict[i],mu,sigma,64, scale = False)
         loss = build_loss(triplet, scale, mu, sigma, 64, scale = False)
         loss_list.append(loss.cpu().detach().numpy())
         #print(f"Epoch: {e}, Timestamp: {i},Loss: {loss_list[-1]}")
         loss.backward()
         optimizer.step()
-    val_mainlist.append(val_loss(t))
+    # val_mainlist.append(val_loss(t))
     loss_mainlist.append(np.mean(loss_list))
-    print(f"Epoch: {e}, Average loss: {np.mean(loss_list)}, Val loss: {val_mainlist[-1]}" )
-    if e%10==0:
-        name = 'model' + str(e)+'.pth'
-        torch.save(t.state_dict(), name)    
-
-name = 'model' + str(e) + '.pth'
-torch.save(t.state_dict(),name)
-
-plt.figure()
-plt.semilogy(loss_mainlist)
-plt.semilogy(val_mainlist)
-plt.legend(['Train loss', 'Val loss'])
-plt.savefig("Loss.png")
 
 
 #t.load_state_dict(torch.load('model20.pth'))
@@ -131,14 +119,16 @@ plt.savefig("Loss.png")
 #Model eval
 mu_timestamp = []
 sigma_timestamp=[]
+attn_weights_per_timestamps = []
 for i in range(lookback,50):
-    _,mu,sigma = t(torch.tensor(dataset[i],dtype = torch.float32).to(device))
+    _,mu,sigma,attn_weights = t(torch.tensor(dataset[i],dtype = torch.float32).to(device))
     mu_timestamp.append(mu.cpu().detach().numpy())
     sigma_timestamp.append(sigma.cpu().detach().numpy())
-    
+    attn_weights_per_timestamp = attn_weights[0][5].cpu().detach().numpy()
+    attn_weights_per_timestamps.append(attn_weights_per_timestamp)
 
 
-#Save mu and sigma matrices    
+#Save mu and sigma matrices
 name = 'Results/SBM'
 save_sigma_mu = True
 sigma_L_arr = []
@@ -146,9 +136,67 @@ mu_L_arr = []
 if save_sigma_mu == True:
         sigma_L_arr.append(sigma_timestamp)
         mu_L_arr.append(mu_timestamp)
-        
+
 if save_sigma_mu == True:
     if not os.path.exists(name+'/Eval_Results/saved_array'):
         os.makedirs(name+'/Eval_Results/saved_array')
     with open(name+'/Eval_Results/saved_array/sigma_as','wb') as f: pickle.dump(sigma_L_arr, f)
     with open(name+'/Eval_Results/saved_array/mu_as','wb') as f: pickle.dump(mu_L_arr, f)
+
+from eval_mod import get_MAP_avg
+import time
+start = time.time()
+MAPS = []
+MRR = []
+for i in tqdm(range(2)):
+    curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr,sigma_L_arr, lookback,data)
+    MAPS.append(curr_MAP)
+    MRR.append(curr_MRR)
+#print mean and std of map and mrr
+print("Mean MAP: ", np.mean(MAPS))
+print("Mean MRR: ", np.mean(MRR))
+print("Std MAP: ", np.std(MAPS))
+print("Std MRR: ", np.std(MRR))
+print("Time taken: ", time.time() - start)
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+import pickle
+
+# Load the list from the file
+with open('attn_mamba.pkl', 'rb') as f:
+    attn_mamba = pickle.load(f)
+
+# Assuming attn_matrix is a list of attention matrices
+attn_matrix = attn_weights_per_timestamps  # Replace with your actual attention matrices
+
+# Ensure both lists have the same length
+assert len(attn_mamba) == len(attn_matrix), "Both lists must have the same length"
+
+# Calculate the global min and max values for consistent color range
+vmin = min(min(attn_mat.min() for attn_mat in attn_mamba), min(attn_mat.min() for attn_mat in attn_matrix))
+vmax = max(max(attn_mat.max() for attn_mat in attn_mamba), max(attn_mat.max() for attn_mat in attn_matrix))
+
+n_timestamps = len(attn_mamba)
+n_rows = (n_timestamps + 3) // 4  # Calculate the number of rows needed
+fig, axes = plt.subplots(n_rows, 8, figsize=(48, n_rows * 6))
+
+# Flatten the axes array for easy iteration
+axes = axes.flatten()
+
+# Visualize each pair of attention matrices as heatmaps in their respective subplots
+for i in range(n_timestamps):
+    sns.heatmap(attn_mamba[i], annot=True, cmap='viridis', cbar=True, ax=axes[2 * i], vmin=vmin, vmax=vmax)
+    axes[2 * i].set_title(f'Mamba Heatmap {lookback+i + 1}')
+
+    sns.heatmap(attn_matrix[i], annot=True, cmap='viridis', cbar=True, ax=axes[2 * i + 1], vmin=vmin, vmax=vmax)
+    axes[2 * i + 1].set_title(f'Transformer Heatmap {lookback+i + 1}')
+
+# Hide any unused subplots
+for j in range(2 * n_timestamps, len(axes)):
+    fig.delaxes(axes[j])
+
+# Display the figure
+plt.tight_layout()
+plt.show()

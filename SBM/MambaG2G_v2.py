@@ -111,6 +111,7 @@ def val_loss(t,val_data):
         val_l = build_loss(triplet, scale, muval, sigmaval, dim_out, scale=False)
         l.append(val_l.cpu().detach().numpy())
     return np.mean(l)
+
 import torch
 import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing

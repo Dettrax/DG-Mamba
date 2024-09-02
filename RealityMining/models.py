@@ -11,14 +11,15 @@ import math
 def a_norm(Q, K):
     m = torch.matmul(Q, K.transpose(2,1).float())
     m /= torch.sqrt(torch.tensor(Q.shape[-1]).float())
-    
+    m = torch.tril(m) #Lower triangular matrix
+    #assign zero values to -inf
+    m[m == 0] = float('-inf')
     return torch.softmax(m , -1)
 
 
 def attention(Q, K, V):
     #Attention(Q, K, V) = norm(QK)V
     a = a_norm(Q, K) #(batch_size, dim_attn, seq_length)
-    a = torch.tril(a) #Lower triangular matrix
     attn_weights = a
     return  torch.matmul(a,  V),attn_weights #(batch_size, seq_length, seq_length)
 

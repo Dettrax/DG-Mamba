@@ -121,13 +121,6 @@ for e in tqdm(range(epochs)):
     #     torch.save(t.state_dict(), name)
 
 
-plt.figure()
-plt.semilogy(loss_mainlist)
-plt.semilogy(val_mainlist)
-plt.legend(['Train loss', 'Val loss'])
-plt.savefig("Loss.png")
-
-
 #t.load_state_dict(torch.load('model20.pth'))
 
 #Model eval
@@ -149,6 +142,45 @@ import seaborn as sns
 import numpy as np
 import pickle
 
+# # Load the list from the file
+# with open('attn_mamba.pkl', 'rb') as f:
+#     attn_mamba = pickle.load(f)
+#
+# # Assuming attn_matrix is a list of attention matrices
+# attn_matrix = attn_weights_per_timestamps  # Replace with your actual attention matrices
+#
+# # Ensure both lists have the same length
+# assert len(attn_mamba) == len(attn_matrix), "Both lists must have the same length"
+#
+# # Calculate the global min and max values for consistent color range
+# vmin = min(min(attn_mat.min() for attn_mat in attn_mamba), min(attn_mat.min() for attn_mat in attn_matrix))
+# vmax = max(max(attn_mat.max() for attn_mat in attn_mamba), max(attn_mat.max() for attn_mat in attn_matrix))
+#
+# # Create a figure with subplots, 2 plots per row (one for each type of attention matrix)
+# n_timestamps = len(attn_mamba)
+# n_rows = (n_timestamps + 1) // 2  # Calculate the number of rows needed
+# fig, axes = plt.subplots(n_rows, 4, figsize=(24, n_rows * 6))
+#
+# # Flatten the axes array for easy iteration
+# axes = axes.flatten()
+#
+# # Visualize each pair of attention matrices as heatmaps in their respective subplots
+# for i in range(n_timestamps):
+#     sns.heatmap(attn_mamba[i], annot=True, cmap='viridis', cbar=True, ax=axes[2 * i], vmin=vmin, vmax=vmax)
+#     axes[2 * i].set_title(f'Mamba Heatmap {lookback+i + 1}')
+#
+#     sns.heatmap(attn_matrix[i], annot=True, cmap='viridis', cbar=True, ax=axes[2 * i + 1], vmin=vmin, vmax=vmax)
+#     axes[2 * i + 1].set_title(f'Transformer Heatmap {lookback+i + 1}')
+#
+# # Hide any unused subplots
+# for j in range(2 * n_timestamps, len(axes)):
+#     fig.delaxes(axes[j])
+#
+# # Display the figure
+# plt.tight_layout()
+# plt.show()
+
+
 # Load the list from the file
 with open('attn_mamba.pkl', 'rb') as f:
     attn_mamba = pickle.load(f)
@@ -163,10 +195,9 @@ assert len(attn_mamba) == len(attn_matrix), "Both lists must have the same lengt
 vmin = min(min(attn_mat.min() for attn_mat in attn_mamba), min(attn_mat.min() for attn_mat in attn_matrix))
 vmax = max(max(attn_mat.max() for attn_mat in attn_mamba), max(attn_mat.max() for attn_mat in attn_matrix))
 
-# Create a figure with subplots, 2 plots per row (one for each type of attention matrix)
 n_timestamps = len(attn_mamba)
-n_rows = (n_timestamps + 1) // 2  # Calculate the number of rows needed
-fig, axes = plt.subplots(n_rows, 4, figsize=(24, n_rows * 6))
+n_rows = (n_timestamps + 3) // 4  # Calculate the number of rows needed
+fig, axes = plt.subplots(n_rows, 8, figsize=(48, n_rows * 6))  # 8 plots per row (4 pairs)
 
 # Flatten the axes array for easy iteration
 axes = axes.flatten()
@@ -174,10 +205,10 @@ axes = axes.flatten()
 # Visualize each pair of attention matrices as heatmaps in their respective subplots
 for i in range(n_timestamps):
     sns.heatmap(attn_mamba[i], annot=True, cmap='viridis', cbar=True, ax=axes[2 * i], vmin=vmin, vmax=vmax)
-    axes[2 * i].set_title(f'Mamba Heatmap {lookback+i + 1}')
+    axes[2 * i].set_title(f'Mamba Heatmap {lookback + i + 1}')
 
     sns.heatmap(attn_matrix[i], annot=True, cmap='viridis', cbar=True, ax=axes[2 * i + 1], vmin=vmin, vmax=vmax)
-    axes[2 * i + 1].set_title(f'Transformer Heatmap {lookback+i + 1}')
+    axes[2 * i + 1].set_title(f'Transformer Heatmap {lookback + i + 1}')
 
 # Hide any unused subplots
 for j in range(2 * n_timestamps, len(axes)):
@@ -186,6 +217,10 @@ for j in range(2 * n_timestamps, len(axes)):
 # Display the figure
 plt.tight_layout()
 plt.show()
+
+
+
+
 #
 # # Calculate the global min and max values for consistent color range
 # vmin = min(attn_mat.min() for attn_mat in attn_matrices)

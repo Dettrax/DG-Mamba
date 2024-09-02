@@ -220,7 +220,7 @@ class MambaG2G(torch.nn.Module):
         self.sigma_fc = nn.Linear(self.D, dim_out)
         self.mu_fc = nn.Linear(self.D, dim_out)
 
-    def forward(self, input,edge_index):
+    def forward(self, input):
         # e = self.enc_input_fc(input)
         e = self.mamba(input)
         e = e.mean(dim=1)  # Average pooling to maintain the expected shape
@@ -250,6 +250,10 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
     #print total model parameters
     print('Total parameters:', sum(p.numel() for p in model.parameters()))
 
+    # Use the correct input size
+    input_size = (100, 2, 96)  # (nodes, time_steps, features)
+    mamba_flops = count_flops(model, input_size)
+    print('Total FLOPs:', mamba_flops)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     # Define parameters
     epochs = 50
@@ -266,8 +270,7 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
                 x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
                 optimizer.zero_grad()
                 x = x.clone().detach().requires_grad_(True).to(device)
-                edge_index = edge_index.clone().detach().to(device)
-                _,mu, sigma = model(x,edge_index)
+                _,mu, sigma = model(x)
                 loss = build_loss(triplet, scale, mu, sigma, 64, scale=False)
 
                 loss_step.append(loss.cpu().detach().numpy())
@@ -284,8 +287,7 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
             x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
             optimizer.zero_grad()
             x = x.clone().detach().requires_grad_(False).to(device)
-            edge_index = edge_index.clone().detach().to(device)
-            _,mu, sigma = model(x,edge_index)
+            _,mu, sigma = model(x)
             curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
             val_loss_value += curr_val_loss
 
@@ -302,8 +304,7 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
             x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
             optimizer.zero_grad()
             x = x.clone().detach().requires_grad_(False).to(device)
-            edge_index = edge_index.clone().detach().to(device)
-            _, mu, sigma = model(x, edge_index)
+            _, mu, sigma = model(x)
             curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
             val_loss_value += curr_val_loss
 
@@ -360,15 +361,68 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
 #     test_data[i] = test.to(device)
 #
 
+def count_flops(model, input_size):
+    def hook_fn(module, input, output):
+        if isinstance(module, (nn.Linear, nn.Conv1d, Mamba)):
+            module.total_ops += torch.prod(torch.tensor(output.shape[1:]))
+
+    hooks = []
+    for module in model.modules():
+        if isinstance(module, (nn.Linear, nn.Conv1d, Mamba)):
+            module.total_ops = 0
+            hooks.append(module.register_forward_hook(hook_fn))
+
+    # Perform a forward pass
+    input = torch.randn(input_size).to(next(model.parameters()).device)
+    model(input)
+
+    total_flops = 0
+    for module in model.modules():
+        if hasattr(module, 'total_ops'):
+            total_flops += module.total_ops
+
+    # Remove hooks
+    for hook in hooks:
+        hook.remove()
+
+    return total_flops * 2  # Multiply by 2 for FLOPs (1 for mul, 1 for add)
+
+
+
 
 lookback = 2
 walk = 16
-model , val_losses , loss_step , test_loss = optimise_mamba(lookback=lookback,dim_in=76,d_conv=9,d_state=6,dropout=0.4285,lr=0.000120,weight_decay=2.4530158734036414e-05,walk_length=walk)
+# model , val_losses , loss_step , test_loss = optimise_mamba(lookback=lookback,dim_in=76,d_conv=9,d_state=6,dropout=0.4285,lr=0.000120,weight_decay=2.4530158734036414e-05,walk_length=walk)
+
+
+config = {
+    'd_model': 96,
+    'd_state': 6,
+    'd_conv': 9
+}
+
+model = MambaG2G(config, 76, 64, dropout=0.42).to(device)
+# print total model parameters
+print('Total parameters:', sum(p.numel() for p in model.parameters()))
+
+flops = []
+for look in range(1,6):
+    # Use the correct input size
+    input_size = (100, look, 96)  # (nodes, time_steps, features)
+    mamba_flops = count_flops(model, input_size)
+    flops.append(mamba_flops)
+    print('Total FLOPs:', mamba_flops)
+
+#plot flops
+from matplotlib import pyplot as plt
+plt.scatter(range(1,6),flops)
+plt.xlabel('Number of nodes')
+plt.ylabel('FLOPs')
+plt.show()
+
 
 # model , val_losses , loss_step = optimise_mamba(lookback=lookback,window_size=96,stride=1,channel=8,pe_dim=6,num_layers=2,d_conv=4,d_state=4,dropout=0.4,lr=0.002,weight_decay=0.004,walk_length=walk)
 
-print("Average Validation Loss: ", np.mean(val_losses))
-print("Average Training Loss: ", np.mean(loss_step))
 #pplot loss
 #add legend
 # y title and x title for loss vs epoch
@@ -391,8 +445,7 @@ with torch.no_grad():
     for i in range(lookback, 90):
         x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
         x = x.clone().detach().requires_grad_(True).to(device)
-        edge_index = edge_index.clone().detach().to(device)
-        _, mu, sigma = model(x, edge_index)
+        _, mu, sigma = model(x)
         mu_timestamp.append(mu.cpu().detach().numpy())
         sigma_timestamp.append(sigma.cpu().detach().numpy())
 name = 'Results/RealityMining'
