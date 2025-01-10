@@ -85,3 +85,17 @@ For further details on the methodology and experimental results, refer to the or
 
 For issues or contributions, please open an issue on the GitHub repository. We welcome feedback and improvements!
 
+### Citation
+
+Pandey, Ashish Parmanand, Alan John Varghese, Sarang Patil, and Mengjia Xu. "A Comparative Study on Dynamic Graph Embedding based on Mamba and Transformers." arXiv preprint arXiv:2412.11293 (2024).
+
+```bash
+@article{pandey2024comparative,
+  title={A Comparative Study on Dynamic Graph Embedding based on Mamba and Transformers},
+  author={Pandey, Ashish Parmanand and Varghese, Alan John and Patil, Sarang and Xu, Mengjia},
+  journal={arXiv preprint arXiv:2412.11293},
+  year={2024}
+}
+
+```
+
