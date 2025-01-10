@@ -51,6 +51,7 @@ class Mamba(nn.Module):
         self.norm_f = RMSNorm(config.d_model)
 
     def forward(self, x):
+        attn_mat = None
         for layer in self.layers:
             x,attn_mat = layer(x)
 
@@ -149,7 +150,7 @@ class MambaBlock(nn.Module):
 
         delta, B, C = torch.split(deltaBC, [self.config.dt_rank, self.config.d_state, self.config.d_state], dim=-1)
         delta = F.softplus(self.dt_proj(delta))
-
+        AttnVecorOverCLS = None
         if self.config.pscan:
             y , AttnVecorOverCLS = self.selective_scan(x, delta, A, B, C, D)
         else:

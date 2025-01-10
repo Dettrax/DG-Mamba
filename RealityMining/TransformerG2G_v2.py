@@ -20,10 +20,10 @@ from models import *
 from utils import *
 import pickle
 import json
-import ray
-from ray import tune
-from ray import train, tune
-from ray.tune.search.optuna import OptunaSearch
+# import ray
+# from ray import tune
+# from ray import train, tune
+# from ray.tune.search.optuna import OptunaSearch
 from exp_mod import get_MAP_avg
 # hyperparams
 dim_out = 64

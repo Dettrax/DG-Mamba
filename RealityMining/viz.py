@@ -245,27 +245,27 @@ lookback = 4
 walk = 16
 model,dataset = optimise_mamba(lookback=lookback,dim_in=76,d_conv=9,d_state=8,dropout=0.4285,lr=0.000120,weight_decay=2.4530158734036414e-05,walk_length=walk)
 
-mu_timestamp = []
-sigma_timestamp = []
-with torch.no_grad():
-    model.eval()
-    for i in range(lookback, 90):
-        x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-        x = x.clone().detach().requires_grad_(True).to(device)
-        edge_index = edge_index.clone().detach().to(device)
-        _, mu, sigma,attn_mat = model(x, edge_index)
-        mu_timestamp.append(mu.cpu().detach().numpy())
-        sigma_timestamp.append(sigma.cpu().detach().numpy())
-
-name = 'Results/RealityMining'
-save_sigma_mu = True
-sigma_L_arr = []
-mu_L_arr = []
-if save_sigma_mu == True:
-    sigma_L_arr.append(sigma_timestamp)
-    mu_L_arr.append(mu_timestamp)
-curr_MAP ,_ = get_MAP_avg(mu_L_arr,lookback,data)
-print(curr_MAP)
+# mu_timestamp = []
+# sigma_timestamp = []
+# with torch.no_grad():
+#     model.eval()
+#     for i in range(lookback, 90):
+#         x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+#         x = x.clone().detach().requires_grad_(True).to(device)
+#         edge_index = edge_index.clone().detach().to(device)
+#         _, mu, sigma,attn_mat = model(x, edge_index)
+#         mu_timestamp.append(mu.cpu().detach().numpy())
+#         sigma_timestamp.append(sigma.cpu().detach().numpy())
+#
+# name = 'Results/RealityMining'
+# save_sigma_mu = True
+# sigma_L_arr = []
+# mu_L_arr = []
+# if save_sigma_mu == True:
+#     sigma_L_arr.append(sigma_timestamp)
+#     mu_L_arr.append(mu_timestamp)
+# curr_MAP ,_ = get_MAP_avg(mu_L_arr,lookback,data)
+# print(curr_MAP)
 
 
 import matplotlib.pyplot as plt

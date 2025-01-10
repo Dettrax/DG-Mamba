@@ -30,7 +30,6 @@ import itertools
 
 from torch.nn import ELU,Dropout
 
-from mamba import MambaConfig
 from mamba_ssm.modules.mamba_simple import Mamba
 from tqdm import tqdm
 
@@ -187,7 +186,6 @@ class MambaG2G(torch.nn.Module):
         super(MambaG2G, self).__init__()
         self.D = dim_in
         self.elu = nn.ELU()
-        self.config = MambaConfig(expand_factor=1,d_model=config['d_model'], d_state=config['d_state'], d_conv=config['d_conv'],n_layers=1)
         self.mamba = Mamba(expand=1,d_model=config['d_model'], d_state=config['d_state'], d_conv=config['d_conv'])
 
         # self.enc_input_fc = nn.Linear(dim_in, dim_in)
@@ -228,7 +226,7 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     # Define parameters
-    epochs = 5
+    epochs = 50
 
     A_matrices = []
     for e in tqdm(range(epochs)):
@@ -254,7 +252,27 @@ lookback = 4
 walk = 16
 model,dataset = optimise_mamba(lookback=lookback,dim_in=76,d_conv=3,d_state=12,dropout=0.4285,lr=0.000120,weight_decay=2.4530158734036414e-05,walk_length=walk)
 
+mu_timestamp = []
+sigma_timestamp = []
+with torch.no_grad():
+    model.eval()
+    for i in range(lookback, 90):
+        x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+        x = x.clone().detach().requires_grad_(True).to(device)
+        edge_index = edge_index.clone().detach().to(device)
+        _, mu, sigma = model(x, edge_index)
+        mu_timestamp.append(mu.cpu().detach().numpy())
+        sigma_timestamp.append(sigma.cpu().detach().numpy())
 
+name = 'Results/RealityMining'
+save_sigma_mu = True
+sigma_L_arr = []
+mu_L_arr = []
+if save_sigma_mu == True:
+    sigma_L_arr.append(sigma_timestamp)
+    mu_L_arr.append(mu_timestamp)
+curr_MAP ,_ = get_MAP_avg(mu_L_arr,lookback,data)
+print(curr_MAP)
 
 
 import matplotlib.pyplot as plt

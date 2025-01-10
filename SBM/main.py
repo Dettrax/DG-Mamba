@@ -127,37 +127,37 @@ for i in range(lookback,50):
     attn_weights_per_timestamp = attn_weights[0][5].cpu().detach().numpy()
     attn_weights_per_timestamps.append(attn_weights_per_timestamp)
 
-
-#Save mu and sigma matrices
-name = 'Results/SBM'
-save_sigma_mu = True
-sigma_L_arr = []
-mu_L_arr = []
-if save_sigma_mu == True:
-        sigma_L_arr.append(sigma_timestamp)
-        mu_L_arr.append(mu_timestamp)
-
-if save_sigma_mu == True:
-    if not os.path.exists(name+'/Eval_Results/saved_array'):
-        os.makedirs(name+'/Eval_Results/saved_array')
-    with open(name+'/Eval_Results/saved_array/sigma_as','wb') as f: pickle.dump(sigma_L_arr, f)
-    with open(name+'/Eval_Results/saved_array/mu_as','wb') as f: pickle.dump(mu_L_arr, f)
-
-from eval_mod import get_MAP_avg
-import time
-start = time.time()
-MAPS = []
-MRR = []
-for i in tqdm(range(2)):
-    curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr,sigma_L_arr, lookback,data)
-    MAPS.append(curr_MAP)
-    MRR.append(curr_MRR)
-#print mean and std of map and mrr
-print("Mean MAP: ", np.mean(MAPS))
-print("Mean MRR: ", np.mean(MRR))
-print("Std MAP: ", np.std(MAPS))
-print("Std MRR: ", np.std(MRR))
-print("Time taken: ", time.time() - start)
+#
+# #Save mu and sigma matrices
+# name = 'Results/SBM'
+# save_sigma_mu = True
+# sigma_L_arr = []
+# mu_L_arr = []
+# if save_sigma_mu == True:
+#         sigma_L_arr.append(sigma_timestamp)
+#         mu_L_arr.append(mu_timestamp)
+#
+# if save_sigma_mu == True:
+#     if not os.path.exists(name+'/Eval_Results/saved_array'):
+#         os.makedirs(name+'/Eval_Results/saved_array')
+#     with open(name+'/Eval_Results/saved_array/sigma_as','wb') as f: pickle.dump(sigma_L_arr, f)
+#     with open(name+'/Eval_Results/saved_array/mu_as','wb') as f: pickle.dump(mu_L_arr, f)
+#
+# from eval_mod import get_MAP_avg
+# import time
+# start = time.time()
+# MAPS = []
+# MRR = []
+# for i in tqdm(range(2)):
+#     curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr,sigma_L_arr, lookback,data)
+#     MAPS.append(curr_MAP)
+#     MRR.append(curr_MRR)
+# #print mean and std of map and mrr
+# print("Mean MAP: ", np.mean(MAPS))
+# print("Mean MRR: ", np.mean(MRR))
+# print("Std MAP: ", np.std(MAPS))
+# print("Std MRR: ", np.std(MRR))
+# print("Time taken: ", time.time() - start)
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -174,29 +174,35 @@ attn_matrix = attn_weights_per_timestamps  # Replace with your actual attention 
 # Ensure both lists have the same length
 assert len(attn_mamba) == len(attn_matrix), "Both lists must have the same length"
 
-# Calculate the global min and max values for consistent color range
-vmin = min(min(attn_mat.min() for attn_mat in attn_mamba), min(attn_mat.min() for attn_mat in attn_matrix))
-vmax = max(max(attn_mat.max() for attn_mat in attn_mamba), max(attn_mat.max() for attn_mat in attn_matrix))
+# Calculate the global min and max values for Mamba and Transformer separately
+vmin_mamba = min(attn_mat.min() for attn_mat in attn_mamba)
+vmax_mamba = max(attn_mat.max() for attn_mat in attn_mamba)
+vmin_transformer = min(attn_mat.min() for attn_mat in attn_matrix)
+vmax_transformer = max(attn_mat.max() for attn_mat in attn_matrix)
 
-n_timestamps = len(attn_mamba)
-n_rows = (n_timestamps + 3) // 4  # Calculate the number of rows needed
-fig, axes = plt.subplots(n_rows, 8, figsize=(48, n_rows * 6))
+# Filter odd timestamps
+odd_indices = [i for i in range(len(attn_mamba)) if True]
+n_odd_timestamps = len(odd_indices)
+n_rows = (n_odd_timestamps + 2) // 3  # Calculate the number of rows needed
+fig, axes = plt.subplots(n_rows, 6, figsize=(36, n_rows * 6), dpi=400)  # 6 plots per row (3 pairs)
 
 # Flatten the axes array for easy iteration
 axes = axes.flatten()
 
 # Visualize each pair of attention matrices as heatmaps in their respective subplots
-for i in range(n_timestamps):
-    sns.heatmap(attn_mamba[i], annot=True, cmap='viridis', cbar=True, ax=axes[2 * i], vmin=vmin, vmax=vmax)
-    axes[2 * i].set_title(f'Mamba Heatmap {lookback+i + 1}')
+for idx, i in enumerate(odd_indices):
+    if 2 * idx < len(axes):
+        sns.heatmap(attn_mamba[i], annot=False, cmap='viridis', cbar=True, ax=axes[2 * idx], vmin=vmin_mamba, vmax=vmax_mamba)
+        axes[2 * idx].set_title(f'Mamba Heatmap {lookback + i + 1}', fontsize=14)
 
-    sns.heatmap(attn_matrix[i], annot=True, cmap='viridis', cbar=True, ax=axes[2 * i + 1], vmin=vmin, vmax=vmax)
-    axes[2 * i + 1].set_title(f'Transformer Heatmap {lookback+i + 1}')
+        sns.heatmap(attn_matrix[i], annot=False, cmap='viridis', cbar=True, ax=axes[2 * idx + 1], vmin=vmin_transformer, vmax=vmax_transformer)
+        axes[2 * idx + 1].set_title(f'Transformer Heatmap {lookback + i + 1}', fontsize=14)
+
 
 # Hide any unused subplots
-for j in range(2 * n_timestamps, len(axes)):
+for j in range(2 * len(odd_indices), len(axes)):
     fig.delaxes(axes[j])
 
-# Display the figure
+# Adjust layout for better spacing
 plt.tight_layout()
 plt.show()
