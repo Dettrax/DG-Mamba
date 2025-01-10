@@ -60,12 +60,12 @@ The Reality Mining dataset consists of human contact data among 100 students fro
 2. **Train the Model:**
     To train the model for DG-Mamba, navigate to the directory and simply run:
     ```bash
-    python mambag2g.py
+    python DG_Mamba.py
     ```
 
     For GDG-Mamba, execute:
     ```bash
-    python mambag2g_v2.py
+    python GDG_Mamba.py
     ```
 
 4. **Results:**
