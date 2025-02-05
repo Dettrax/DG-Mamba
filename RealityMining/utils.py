@@ -453,7 +453,7 @@ class dataset_mit(torch.utils.data.Dataset):
 
             df1 = df[df['time']== i]
             arr = df1[['source', 'target']].to_numpy()
-            
+
             A, X_Sparse, size = self.get_graph(arr, max_size)
             if size > max_size:
                 max_size = size
@@ -461,12 +461,10 @@ class dataset_mit(torch.utils.data.Dataset):
             self.Adj_arr.append(A)
             self.X_Sparse_arr.append(X_Sparse)
             count = count + 1
-            
-            
+
     def __len__(self):
-        return len(self.img_filename)
-    
-    
+        return len(self.Adj_arr)
+
     def __getitem__(self, idx):
        
         

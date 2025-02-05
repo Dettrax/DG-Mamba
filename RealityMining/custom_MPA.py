@@ -38,34 +38,7 @@ from tqdm import tqdm
 
 from torch.nn.utils import clip_grad_norm_
 
-from torch.nn import (
-    BatchNorm1d,
-    Embedding,
-    Linear,
-    ModuleList,
-    ReLU,
-    Sequential,
-)
-import numpy as np
-from torch_geometric.nn import GINEConv, global_add_pool
-import inspect
-from typing import Any, Dict, Optional
 
-import torch.nn.functional as F
-from torch import Tensor
-from torch.nn import Dropout, Linear, Sequential
-
-from torch_geometric.nn.conv import MessagePassing
-from torch_geometric.nn.inits import reset
-from torch_geometric.nn.resolver import (
-    activation_resolver,
-    normalization_resolver,
-)
-from torch_geometric.typing import Adj
-from torch_geometric.utils import to_dense_batch
-
-#from mamba_ssm import Mamba
-from torch_geometric.utils import degree, sort_edge_index
 
 import torch
 import torch.nn as nn
@@ -242,183 +215,118 @@ class MambaG2G(torch.nn.Module):
         return x, mu, sigma
 
 
-def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_length):
-
-
-    # Create dataset
-    dataset = RMDataset(data, lookback,walk_length)
-    config = {
-        'd_model':96,
-        'd_state':d_state,
-        'd_conv':d_conv
-    }
-
-    model = MambaG2G(config, dim_in, 64, dropout=dropout).to(device)
-    #print total model parameters
-    print('Total parameters:', sum(p.numel() for p in model.parameters()))
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    # Define parameters
-    epochs = 5
-    # To store A matrices across timestamps and epochs
-    val_losses = []
-    train_loss = []
-    test_loss = []
-    best_MAP = 0
-    best_model = None
-    for e in tqdm(range(epochs)):
-        model.train()
-        loss_step = []
-        for i in range(lookback, 63):
-                x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-                optimizer.zero_grad()
-                x = x.clone().detach().requires_grad_(True).to(device)
-                _,mu, sigma = model(x)
-                loss = build_loss(triplet, scale, mu, sigma, 64, scale=False)
-
-                loss_step.append(loss.cpu().detach().numpy())
-                loss.backward()
-                clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-
-    val_loss_value = 0.0
-    val_samples = 0
-
-    with torch.no_grad():
-        model.eval()
-        for i in range(63, 72):
-            x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-            optimizer.zero_grad()
-            x = x.clone().detach().requires_grad_(False).to(device)
-            _,mu, sigma = model(x)
-            curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
-            val_loss_value += curr_val_loss
-
-            val_samples += 1
-        val_loss_value /= val_samples
-    # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {val_loss_value}")
-    val_losses.append(val_loss_value)
-    train_loss.append(np.mean(np.stack(loss_step)))
-    val_loss_value = 0.0
-    val_samples = 0
-    with torch.no_grad():
-        model.eval()
-        for i in range(72, 90):
-            x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-            optimizer.zero_grad()
-            x = x.clone().detach().requires_grad_(False).to(device)
-            _, mu, sigma = model(x)
-            curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
-            val_loss_value += curr_val_loss
-
-            val_samples += 1
-        val_loss_value /= val_samples
-    test_loss.append(val_loss_value)
-    # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} TEst Loss: {val_loss_value}")
-    if e %(epochs-1) ==0:
-        mu_timestamp = []
-        sigma_timestamp = []
-        with torch.no_grad():
-            model.eval()
-            for i in range(lookback, 90):
-                x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-                x = x.clone().detach().requires_grad_(True).to(device)
-                _, mu, sigma = model(x)
-                mu_timestamp.append(mu.cpu().detach().numpy())
-                sigma_timestamp.append(sigma.cpu().detach().numpy())
-
-        # Save mu and sigma matrices
-        name = 'Results/RealityMining'
-        save_sigma_mu = True
-        sigma_L_arr = []
-        mu_L_arr = []
-        if save_sigma_mu == True:
-            sigma_L_arr.append(sigma_timestamp)
-            mu_L_arr.append(mu_timestamp)
-        curr_MAP ,_ = get_MAP_avg(mu_L_arr,lookback,data)
-        if curr_MAP > best_MAP:
-            best_MAP = curr_MAP
-            best_model = model
-            # torch.save(model.state_dict(), 'best_model.pth')
-            print("Best MAP: ",e, best_MAP,sep=" ")
-
-    return best_model , val_losses , train_loss , test_loss
-
-
-# Train/Val/Test split
-
-# train_data = {}
-# for i in range(lookback, 63):
-#     train = torch.tensor(dataset[i], dtype=torch.float32)
-#     train_data[i] = train.to(device)
-#
-# val_data = {}
-# for i in range(63, 72):
-#     val = torch.tensor(dataset[i], dtype=torch.float32)
-#     val_data[i] = val.to(device)
-#
-# test_data = {}
-# for i in range(72, 90):
-#     test = torch.tensor(dataset[i], dtype=torch.float32)
-#     test_data[i] = test.to(device)
-#
-
-
 lookback = 2
 walk = 16
-model , val_losses , loss_step , test_loss = optimise_mamba(lookback=lookback,dim_in=76,d_conv=9,d_state=6,dropout=0.4285,lr=0.000120,weight_decay=2.4530158734036414e-05,walk_length=walk)
 
+# Create dataset
+dataset = RMDataset(data, lookback,16)
+config = {
+    'd_model':96,
+    'd_state':6,
+    'd_conv':9
+}
 
-# model , val_losses , loss_step = optimise_mamba(lookback=lookback,window_size=96,stride=1,channel=8,pe_dim=6,num_layers=2,d_conv=4,d_state=4,dropout=0.4,lr=0.002,weight_decay=0.004,walk_length=walk)
+model = MambaG2G(config, 76, 64, dropout=0.4).to(device)
+#print total model parameters
+print('Total parameters:', sum(p.numel() for p in model.parameters()))
+optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=2.4e-5)
+# Define parameters
+epochs = 50
+# To store A matrices across timestamps and epochs
+val_losses = []
+train_loss = []
+test_loss = []
+best_MAP = 0
+best_model = None
+mu_epoch = []
+for e in tqdm(range(epochs)):
+    model.train()
+    loss_step = []
+    i = lookback
+    for i in range(lookback, 63):
+            x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+            optimizer.zero_grad()
+            x = x.clone().detach().requires_grad_(True).to(device)
+            _,mu, sigma = model(x)
 
-#pplot loss
-#add legend
-# y title and x title for loss vs epoch
-# from matplotlib import pyplot as plt
-# plt.semilogy(val_losses)
-# plt.semilogy(loss_step)
-# plt.semilogy(test_loss)
-# plt.legend(['Validation Loss','Training Loss','Test Loss'])
-# plt.xlabel('Epoch')
-# plt.ylabel('Loss')
-# plt.show()
+            loss = build_loss(triplet, scale, mu, sigma, 64, scale=False)
 
-dataset = RMDataset(data, lookback, walk)
-#read the best_model.pt
-# model.load_state_dict(torch.load('best_model.pth'))
-mu_timestamp = []
-sigma_timestamp = []
+            loss_step.append(loss.cpu().detach().numpy())
+            loss.backward()
+            clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+mu_epoch = []
 with torch.no_grad():
     model.eval()
     for i in range(lookback, 90):
         x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
         x = x.clone().detach().requires_grad_(True).to(device)
         _, mu, sigma = model(x)
-        mu_timestamp.append(mu.cpu().detach().numpy())
-        sigma_timestamp.append(sigma.cpu().detach().numpy())
-name = 'Results/RealityMining'
-save_sigma_mu = True
-sigma_L_arr = []
-mu_L_arr = []
-if save_sigma_mu == True:
-    sigma_L_arr.append(sigma_timestamp)
-    mu_L_arr.append(mu_timestamp)
+        mu_epoch.append(mu[:5].cpu().detach().numpy())
 
-import time
-start = time.time()
-MAPS = []
-MRR = []
-for i in tqdm(range(5)):
-    curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, lookback,data)
-    MAPS.append(curr_MAP)
-    MRR.append(curr_MRR)
-#print mean and std of map and mrr
-print("Mean MAP: ", np.mean(MAPS))
-print("Mean MRR: ", np.mean(MRR))
-print("Std MAP: ", np.std(MAPS))
-print("Std MRR: ", np.std(MRR))
-print("Time taken: ", time.time() - start)
+import matplotlib.pyplot as plt
+import networkx as nx
+import umap
+import matplotlib.animation as animation
+import torch
+
+# Assume that the following have already been defined and initialized:
+# - data: your original data dictionary where each key t maps to (adjacency matrix, ...)
+# - dataset: an instance of RMDataset (or similar) where dataset[t] returns (x, pe, edge_index, edge_attr, batch, triplet, scale)
+# - model: your trained model which, given x, returns (_, mu, sigma)
+# - device: the torch device (e.g., torch.device("cuda:0") or "cpu")
+
+# Get a sorted list of timestamps for which you want to animate.
+sorted_timestamps = sorted(dataset.dataset.keys())
+
+# Create the figure for the animation.
+fig, ax = plt.subplots(figsize=(8, 8))
+
+# Fit UMAP once on the first timestamp for stable projections
+x_init, _, _, _, _, _, _ = dataset[sorted_timestamps[0]]
+x_init = x_init.clone().detach().requires_grad_(True).to(device)
+_, mu_init, _ = model(x_init)
+mu_np_init = mu_init.cpu().detach().numpy()
+umap_reducer = umap.UMAP(n_components=2, random_state=42)
+umap_reducer.fit(mu_np_init)
+
+# Store initial positions of nodes
+initial_positions = {i: pos for i, pos in enumerate(umap_reducer.transform(mu_np_init))}
 
 
+def update(frame):
+    ax.clear()
+    current_t = sorted_timestamps[frame]
+    adj_matrix = data[current_t][0]
+
+    try:
+        G = nx.from_scipy_sparse_array(adj_matrix)
+    except AttributeError:
+        G = nx.from_scipy_sparse_matrix(adj_matrix)
+
+    x, _, _, _, _, _, _ = dataset[current_t]
+    x = x.clone().detach().requires_grad_(True).to(device)
+    _, mu, _ = model(x)
+    mu_np = mu.cpu().detach().numpy()
+    embeddings_2d = umap_reducer.transform(mu_np)
+
+    # Update positions only if they change, else keep the previous ones
+    for i in range(len(embeddings_2d)):
+        if not np.array_equal(initial_positions[i], embeddings_2d[i]):
+            initial_positions[i] = embeddings_2d[i]
+
+    pos = initial_positions
+
+    nx.draw_networkx_nodes(G, pos, ax=ax, node_size=300, node_color='lightgreen', alpha=0.9)
+    nx.draw_networkx_edges(G, pos, ax=ax, width=1.0, alpha=0.6)
+    nx.draw_networkx_labels(G, pos, ax=ax, font_size=10)
+
+    ax.set_title(f"Graph at Timestamp {current_t}")
+    ax.axis("off")
+    return ax,
 
 
-#{'dim_in': 16, 'num_layers': 8, 'd_conv': 4, 'd_state': 32, 'dropout': 0.1589482867005636, 'lr': 0.0034744871879953997, 'weight_decay': 0.0038647580212313047}
+ani = animation.FuncAnimation(fig, update, frames=len(sorted_timestamps), interval=1000, blit=False)
+plt.show()
+ani.save('graph_animation.gif', writer='imagemagick', fps=1)
