@@ -249,7 +249,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, Subset
 import numpy as np
-from mamba_ssm import Mamba
 from sklearn.metrics import average_precision_score
 
 
@@ -382,7 +381,7 @@ def sample_triplets(adjacency, embeddings, num_samples=1000, k_hop=2):
 
 
 def train_embedder(model, train_loader, epochs=50, device='cuda'):
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001,weight_decay=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.005,weight_decay=1e-4)
     model.train()
 
     for epoch in range(epochs):
@@ -391,6 +390,7 @@ def train_embedder(model, train_loader, epochs=50, device='cuda'):
         for batch in train_loader:
             history_graphs = batch['history_graphs'].to(device)
             target = batch['target'].squeeze(1).to(device)
+
 
             # Get node embeddings
             embeddings = model(history_graphs)
@@ -413,7 +413,7 @@ def train_embedder(model, train_loader, epochs=50, device='cuda'):
     return model
 
 
-def train_link_predictor(embedder, link_predictor, train_loader, epochs=50, device='cuda'):
+def train_link_predictor(embedder, link_predictor, train_loader,test_loader, epochs=50, device='cuda'):
     optimizer = torch.optim.Adam(link_predictor.parameters(), lr=0.001)
     criterion = nn.BCELoss()
     best_map = 0
@@ -447,7 +447,7 @@ def train_link_predictor(embedder, link_predictor, train_loader, epochs=50, devi
         all_targets = []
 
         with torch.no_grad():
-            for batch in train_loader:
+            for batch in test_loader:
                 history_graphs = batch['history_graphs'].to(device)
                 target = batch['target'].squeeze(1).to(device)
 
@@ -489,16 +489,80 @@ def main(temporal_data, device='cuda'):
     train_data = Subset(temporal_data, train_indices)
     test_data = Subset(temporal_data, test_indices)
 
-    train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
-    test_loader = DataLoader(test_data, batch_size=32)
+    train_loader = DataLoader(train_data, batch_size=64, shuffle=True)
+    test_loader = DataLoader(test_data, batch_size=64)
 
     # Train embedder using triplet loss
     print("Training embedder...")
-    #embedder = train_embedder(embedder, train_loader, epochs=100, device=device)
+    embedder = train_embedder(embedder, train_loader, epochs=50, device=device)
+
+    # import torch
+    #
+    # # Extract embeddings from the trained model
+    # with torch.no_grad():
+    #     node_embeddings = []
+    #     for batch in test_loader:
+    #         history_graphs = batch['history_graphs'].to(device)
+    #         embeddings = embedder(history_graphs)  # (batch_size, num_nodes, hidden_dim)
+    #         node_embeddings.append(embeddings.to('cpu'))
+    #
+    # # Concatenate embeddings from all batches
+    # node_embeddings = torch.cat(node_embeddings, dim=0)  # Shape: (total_samples, num_nodes, hidden_dim)
+    # from sklearn.decomposition import PCA
+    # import numpy as np
+    #
+    # # Convert to 2D for visualization
+    # num_nodes = node_embeddings.shape[1]
+    # embedding_matrix = node_embeddings.mean(dim=0).numpy()  # (num_nodes, hidden_dim)
+    #
+    # pca = PCA(n_components=2)
+    # reduced_embeddings = pca.fit_transform(embedding_matrix)  # (num_nodes, 2)
+    # import matplotlib.pyplot as plt
+    # import networkx as nx
+    #
+    # # Create NetworkX graph
+    # G = nx.from_scipy_sparse_array(data[0][0])  # First time step adjacency matrix
+    #
+    # plt.figure(figsize=(10, 8))
+    # plt.scatter(reduced_embeddings[:, 0], reduced_embeddings[:, 1], s=100, c='blue', alpha=0.6, label="Nodes")
+    #
+    # # Draw edges based on adjacency matrix
+    # for edge in G.edges(data=False):  # `data=False` ensures only (source, target)
+    #     i, j = edge  # Extract only the two nodes
+    #     plt.plot([reduced_embeddings[i, 0], reduced_embeddings[j, 0]],
+    #              [reduced_embeddings[i, 1], reduced_embeddings[j, 1]],
+    #              'gray', alpha=0.5)
+    #
+    # plt.title("Node Embeddings Visualization (PCA/t-SNE)")
+    # plt.xlabel("Component 1")
+    # plt.ylabel("Component 2")
+    # plt.legend()
+    # plt.show()
+    # from scipy.spatial.distance import euclidean
+    # import torch
+    #
+    # # Compute pairwise distances between node embeddings
+    # pairwise_distances = np.zeros((num_nodes, num_nodes))
+    # for i in range(num_nodes):
+    #     for j in range(num_nodes):
+    #         pairwise_distances[i, j] = euclidean(reduced_embeddings[i], reduced_embeddings[j])
+    #
+    # # Get predicted link probabilities from the trained model
+    # with torch.no_grad():
+    #     pred_probs = link_predictor(torch.tensor(embedding_matrix).to(device).unsqueeze(0)).squeeze(
+    #         0).cpu().numpy()  # (num_nodes, num_nodes)
+    #
+    # # Scatter plot: Distance vs. Link Prediction Probability
+    # plt.figure(figsize=(8, 6))
+    # plt.scatter(pairwise_distances.flatten(), pred_probs.flatten(), alpha=0.5)
+    # plt.xlabel("Pairwise Embedding Distance")
+    # plt.ylabel("Predicted Link Probability")
+    # plt.title("Distance vs. Link Prediction Probability")
+    # plt.show()
 
     # Train link predictor using trained embeddings
     print("\nTraining link predictor...")
-    link_predictor, best_map = train_link_predictor(embedder, link_predictor, train_loader, epochs=50, device=device)
+    link_predictor, best_map = train_link_predictor(embedder, link_predictor, train_loader, test_loader,epochs=50, device=device)
 
     return embedder, link_predictor, best_map
 

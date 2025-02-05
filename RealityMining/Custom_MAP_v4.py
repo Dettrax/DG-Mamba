@@ -423,5 +423,5 @@ def train_and_evaluate(temporal_data, epochs=50, batch_size=32):
 # Usage
 if __name__ == "__main__":
     temporal_data = create_temporal_dataset(data, time_window=5, predict_window=1)
-    model, best_map = train_and_evaluate(temporal_data, epochs=100, batch_size=64)
+    model, best_map = train_and_evaluate(temporal_data, epochs=50, batch_size=64)
     print(f"Final Best MAP Score: {best_map:.4f}")
