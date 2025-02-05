@@ -502,7 +502,6 @@ def main(temporal_data, device='cuda'):
 
     return embedder, link_predictor, best_map
 
-
 if __name__ == "__main__":
     # Assuming temporal_data is created using the TemporalGraphDataset class
     temporal_data = create_temporal_dataset(data, time_window=3, predict_window=1)
