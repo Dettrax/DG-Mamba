@@ -21,7 +21,8 @@ from torch.utils.data import Dataset, DataLoader
 import warnings
 warnings.filterwarnings("ignore")
 
-from mamba_ssm import Mamba
+from mamba2_torch.modeling.configuration_mamba2 import Mamba2Config
+from mamba2_torch.modeling.modeling_mamba2 import Mamba2Block
 from tqdm import tqdm
 
 
@@ -236,6 +237,65 @@ from torch.utils.data import Dataset, DataLoader, Subset
 import numpy as np
 from sklearn.metrics import average_precision_score
 
+class Mamba2Config(Mamba2Config):
+    def __init__(
+            self,
+            vocab_size=30522,
+            hidden_size=64,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            state_size=16,
+            num_heads=4,
+            head_dim=16,
+            conv_kernel=4,
+            use_bias=True,
+            use_conv_bias=True,
+            layer_norm_epsilon=1e-5,
+            emb_initializer_range=0.02,
+            conv_initializer_range=None,
+            rescale_prenorm_residual=False,
+            residual_in_fp32=True,
+            chunk_size=256,
+            A_initializer_range=(1, 16),
+            time_step_min=0.001,
+            time_step_max=0.1,
+            time_step_floor=1e-4,
+            output_last_ssm_states=True,
+            time_step_limit=(0.0, float("inf")),
+            use_triton_kernels=False,
+            dropout_rate=0.3,
+            use_cache=True,
+            hidden_act="silu",  # Add this line
+            **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.dropout_rate = dropout_rate
+        self.use_cache = use_cache
+        self.output_last_ssm_states = output_last_ssm_states
+        self.time_step_min = time_step_min
+        self.time_step_max = time_step_max
+        self.A_initializer_range = A_initializer_range
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.num_hidden_layers = num_hidden_layers
+        self.state_size = state_size
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.conv_kernel = conv_kernel
+        self.use_bias = use_bias
+        self.use_conv_bias = use_conv_bias
+        self.layer_norm_epsilon = layer_norm_epsilon
+        self.emb_initializer_range = emb_initializer_range
+        self.conv_initializer_range = conv_initializer_range
+        self.rescale_prenorm_residual = rescale_prenorm_residual
+        self.residual_in_fp32 = residual_in_fp32
+        self.time_step_limit = time_step_limit
+        self.time_step_floor = time_step_floor
+        self.chunk_size = chunk_size
+        self.use_triton_kernels = use_triton_kernels
+        self.hidden_act = hidden_act  # Add this line
+
 
 class NodeEmbedder(nn.Module):
     def __init__(self, num_nodes=96, hidden_dim=64):
@@ -251,11 +311,7 @@ class NodeEmbedder(nn.Module):
         )
 
         # Temporal attention using Mamba
-        self.temporal_attention = Mamba(
-            d_model=hidden_dim,
-            d_state=16,
-            d_conv=3
-        )
+        self.temporal_attention = Mamba2Block(config=Mamba2Config(), layer_idx=0)
 
         self.post_process = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
@@ -279,7 +335,7 @@ class NodeEmbedder(nn.Module):
         embeddings = embeddings.permute(1, 0, 2)
 
         # Apply temporal attention
-        attended = self.temporal_attention(embeddings)
+        attended , _ = self.temporal_attention(embeddings)
 
         # Get final embeddings
         node_embeddings = attended[:, -1, :].view(batch_size, num_nodes, self.hidden_dim)
@@ -484,12 +540,14 @@ def main(temporal_data, device='cuda'):
     train_data = Subset(temporal_data, train_indices)
     test_data = Subset(temporal_data, test_indices)
 
-    train_loader = DataLoader(train_data, batch_size=64, shuffle=True)
-    test_loader = DataLoader(test_data, batch_size=512)
+    train_loader = DataLoader(train_data, batch_size=8, shuffle=True)
+    test_loader = DataLoader(test_data, batch_size=8)
 
     # Train embedder using triplet loss
     print("Training embedder...")
     embedder = train_embedder(embedder, train_loader, epochs=50, device=device)
+    #clear memory gpu
+    torch.cuda.empty_cache()
 
     # import torch
     #
