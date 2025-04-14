@@ -1,38 +1,26 @@
-import numpy as np
+import torch
+from mamba_ssm import Mamba2
 
-# Given values
-x = np.array([1, 3, 4])
-A = np.array([4, 2])
-C = np.array([1, 3, 2])
-delta = np.array([1, 3, 4])
-delta_A = np.array([1, 3, 4, 2])
+# Original dimensions
+batch, length, dim = 8, 4, 92
+x = torch.randn(batch, length, dim).to("cuda")
 
-# Functions f_A and f_B
-def f_A(delta_i, A):
-    return np.exp(delta_i * A)
+# Model configuration with ALL dimensions divisible by 8
+model = Mamba2(
+    d_model=96,     # Rounded up from 92 to be divisible by 8
+    d_state=64,     # Changed from 6 to 64 (must be divisible by 8)
+    d_conv=4,       # Changed from 3 to 4 to be even (better for performance)
+    expand=2,       # This is a multiplier
+    headdim=16,     # This is already divisible by 8
+).to("cuda")
 
-def f_B(delta_i, B_i):
-    return delta_i * B_i
+# Pad input to match model dimension
+pad = torch.zeros(batch, length, 96-dim, device="cuda")
+padded_x = torch.cat([x, pad], dim=-1)
 
-# Compute Ā and B̄ for each time step
-A_bar = [f_A(delta[i], A) for i in range(len(delta))]
-B_bar = [f_B(delta[i], C[i]) for i in range(len(delta))]
+# Forward pass
+y = model(padded_x)
 
-# To correct the previous approach, let's compute each element of alpha_tilde as a sum of scalar products
-# For each entry, we need to multiply the appropriate scalar values and sum them up
-
-# Initialize alpha_tilde as a matrix of the correct shape
-alpha_tilde = np.zeros((len(x), len(x)))
-
-# Fill alpha_tilde matrix with scalar values
-for i in range(len(x)):
-    for j in range(i+1):
-        if j == i:
-            alpha_tilde[i, j] = C[i] * B_bar[i].sum()
-        else:
-            product_A = np.prod([A_bar[k].sum() for k in range(j+1, i+1)])
-            alpha_tilde[i, j] = C[i] * product_A * B_bar[j].sum()
-
-# Compute the output y
-y = np.dot(alpha_tilde, x)
-alpha_tilde, y
+# For output, trim back to original dimension
+trimmed_y = y[:, :, :dim]
+assert trimmed_y.shape == x.shape

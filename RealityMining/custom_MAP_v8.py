@@ -21,7 +21,7 @@ from torch.utils.data import Dataset, DataLoader
 import warnings
 warnings.filterwarnings("ignore")
 
-from mamba_ssm import Mamba
+from mamba_ssm import Mamba2
 from tqdm import tqdm
 
 
@@ -253,10 +253,11 @@ class NodeEmbedder(nn.Module):
         )
 
         # Temporal attention using Mamba
-        self.temporal_attention = Mamba(
+        self.temporal_attention = Mamba2(
             d_model=hidden_dim,
             d_state=16,
-            d_conv=3
+            d_conv=3,
+            headdim=8
         )
 
         self.post_process = nn.Sequential(

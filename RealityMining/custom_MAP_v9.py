@@ -240,7 +240,7 @@ from sklearn.metrics import average_precision_score
 
 
 class NodeEmbedder(nn.Module):
-    def __init__(self, num_nodes=96, hidden_dim=64):
+    def __init__(self, num_nodes=96, hidden_dim=64, num_heads=4, dropout=0.2):
         super().__init__()
         self.hidden_dim = hidden_dim
 
@@ -248,21 +248,25 @@ class NodeEmbedder(nn.Module):
         self.graph_encoder = nn.Sequential(
             nn.Linear(num_nodes, hidden_dim),
             nn.SiLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim)
         )
 
-        # Temporal attention using Mamba
-        self.temporal_attention = Mamba(
-            d_model=hidden_dim,
-            d_state=16,
-            d_conv=3
+        # Multihead attention for temporal modeling
+        self.temporal_attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
         )
+
+        # Layer norm for attention
+        self.norm1 = nn.LayerNorm(hidden_dim)
 
         self.post_process = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim)
         )
 
@@ -275,22 +279,26 @@ class NodeEmbedder(nn.Module):
         graph_embeddings = self.graph_encoder(history_graphs.view(-1, num_nodes))
         graph_embeddings = graph_embeddings.view(batch_size, seq_len, num_nodes, -1)
 
-        # Reshape for temporal attention
-        embeddings = graph_embeddings.permute(1, 0, 2, 3)
-        embeddings = embeddings.reshape(seq_len, batch_size * num_nodes, self.hidden_dim)
-        embeddings = embeddings.permute(1, 0, 2)
+        # Reshape for temporal attention (batch_size, seq_len, num_nodes, hidden_dim)
+        # -> (batch_size * num_nodes, seq_len, hidden_dim)
+        embeddings = graph_embeddings.permute(0, 2, 1, 3).contiguous()
+        embeddings = embeddings.view(batch_size * num_nodes, seq_len, self.hidden_dim)
 
-        # Apply temporal attention
-        attended = self.temporal_attention(embeddings)
+        # Self-attention on the temporal dimension
+        attn_output, _ = self.temporal_attention(
+            embeddings, embeddings, embeddings
+        )
 
-        # Get final embeddings
-        node_embeddings = attended[:, -1, :].view(batch_size, num_nodes, self.hidden_dim)
+        # Residual connection and normalization
+        embeddings = self.norm1(embeddings + attn_output)
+
+        # Get final timestep embedding and reshape back
+        node_embeddings = embeddings[:, -1, :].view(batch_size, num_nodes, self.hidden_dim)
 
         # Post-process embeddings
         node_embeddings = self.post_process(node_embeddings)
 
         return node_embeddings
-
 
 class LinkPredictor(nn.Module):
     def __init__(self, embedding_dim=64):
@@ -414,6 +422,7 @@ def train_link_predictor(embedder, link_predictor, train_loader,test_loader, epo
     optimizer = torch.optim.Adam(link_predictor.parameters(), lr=0.005,weight_decay=1e-4)
     criterion = nn.BCELoss()
     best_map = 0
+    temp_auc  = 0
 
     for epoch in range(epochs):
         link_predictor.train()
@@ -457,15 +466,18 @@ def train_link_predictor(embedder, link_predictor, train_loader,test_loader, epo
         all_preds = np.concatenate([p.reshape(-1) for p in all_preds])
         all_targets = np.concatenate([t.reshape(-1) for t in all_targets])
         map_score = average_precision_score(all_targets, all_preds)
-
+        auc_score = roc_auc_score(all_targets, all_preds)
         if map_score > best_map:
             best_map = map_score
+            temp_auc = auc_score
+
 
         if (epoch + 1) % 5 == 0:
             print(f'Epoch {epoch + 1}/{epochs}')
             print(f'Average Loss: {total_loss / len(train_loader):.4f}')
             print(f'MAP Score: {map_score:.4f}')
             print(f'Best MAP Score: {best_map:.4f}')
+            print(f'AUC Score: {temp_auc:.4f}')
             print('------------------------')
 
     return link_predictor, best_map
@@ -486,7 +498,7 @@ def main(temporal_data, device='cuda'):
     train_data = Subset(temporal_data, train_indices)
     test_data = Subset(temporal_data, test_indices)
 
-    train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
+    train_loader = DataLoader(train_data, batch_size=128, shuffle=True)
     test_loader = DataLoader(test_data, batch_size=128)
 
     # Train embedder using triplet loss

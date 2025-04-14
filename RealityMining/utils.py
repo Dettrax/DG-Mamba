@@ -261,16 +261,18 @@ def sparse_feeder(M):
 
 def spy_sparse2torch_sparse(data):
     """
+    Convert a scipy sparse csr matrix to a sparse torch tensor
 
     :param data: a scipy sparse csr matrix
     :return: a sparse torch tensor
     """
-    samples=data.shape[0]
-    features=data.shape[1]
-    values=data.data
-    coo_data=data.tocoo()
-    indices=torch.LongTensor([coo_data.row,coo_data.col])
-    t=torch.sparse.FloatTensor(indices,torch.from_numpy(values).float(),[samples,features])
+    samples = data.shape[0]
+    features = data.shape[1]
+    coo_data = data.tocoo()
+    values = coo_data.data  # Use coo_data.data instead of data.data
+    indices = torch.LongTensor([coo_data.row, coo_data.col])
+    t = torch.sparse.FloatTensor(indices, torch.FloatTensor(values), [samples, features])
+
     return t
 
 
