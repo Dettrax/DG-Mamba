@@ -199,7 +199,6 @@ class MambaG2G(torch.nn.Module):
         self.out_fc = nn.Linear(config['d_model'], self.D)  # Adjusted to match output dimension
 
         self.mu_fc = nn.Linear(self.D, dim_out)
-        self.scale = nn.Parameter(torch.tensor(0.1, dtype=torch.float32), requires_grad=True)
 
     def forward(self, input):
         # e = self.enc_input_fc(input)
@@ -209,7 +208,7 @@ class MambaG2G(torch.nn.Module):
         x = self.out_fc(e)
         x = self.silu(x)
         x = self.dropout(x)  # Apply dropout after the activation
-        mu = exp_map_origin(self.mu_fc(x)*self.scale, torch.tensor(- c))
+        mu = exp_map_origin(self.mu_fc(x), torch.tensor(- c))
 
         return x, mu, None
 
