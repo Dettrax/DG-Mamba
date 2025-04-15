@@ -182,28 +182,24 @@ class RMDataset(Dataset):
 #     return np.mean(l)
 
 
-def Energy_KL(mu, sigma, pairs, L):
-    ij_mu = mu[pairs]
-    ij_sigma = sigma[pairs]
-    sigma_ratio = ij_sigma[:, 1] / (ij_sigma[:, 0] + 1e-14)
-    trace_fac = torch.sum(sigma_ratio, 1)
-    log_det = torch.sum(torch.log(sigma_ratio + 1e-14), 1)
-    mu_diff_sq = torch.sum(torch.square(ij_mu[:, 0] - ij_mu[:, 1]) / (ij_sigma[:, 0] + 1e-14), 1)
-    return 0.5 * (trace_fac + mu_diff_sq - L - log_det)
 
+def triplet_loss(anchor, positive, negative, margin=1.0):
+    """
+    Compute triplet loss: max(0, distance(anchor, positive) - distance(anchor, negative) + margin)
 
-# Define loss function
-def build_loss(triplets, scale_terms, mu, sigma, L, scale):
-    hop_pos = torch.stack([torch.tensor(triplets[:, 0]), torch.tensor(triplets[:, 1])], 1).type(torch.int64)
-    hop_neg = torch.stack([torch.tensor(triplets[:, 0]), torch.tensor(triplets[:, 2])], 1).type(torch.int64)
-    eng_pos = Energy_KL(mu, sigma, hop_pos, L)
-    eng_neg = Energy_KL(mu, sigma, hop_neg, L)
-    energy = torch.square(eng_pos) + torch.exp(-eng_neg)
-    if scale:
-        loss = torch.mean(energy * torch.Tensor(scale_terms).cpu())
-    else:
-        loss = torch.mean(energy)
-    return loss
+    Args:
+        anchor: Anchor embeddings
+        positive: Positive embeddings
+        negative: Negative embeddings
+        margin: Margin value (default: 1.0)
+
+    Returns:
+        mean of triplet losses across the batch
+    """
+    distance_positive = torch.sum((anchor - positive) ** 2, dim=1)
+    distance_negative = torch.sum((anchor - negative) ** 2, dim=1)
+    loss = torch.clamp(distance_positive - distance_negative + margin, min=0.0)
+    return torch.mean(loss)
 
 
 import torch
@@ -267,6 +263,54 @@ from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 
 
+from sklearn.metrics import f1_score, precision_score, recall_score
+
+
+def evaluate_by_threshold(scores, labels, threshold, smaller_scores_better=False, truth_label=1):
+    """Evaluate predictions against ground truth using a threshold."""
+    if smaller_scores_better:
+        predictions = (scores <= threshold).int()
+    else:
+        predictions = (scores >= threshold).int()
+
+    # Calculate metrics
+    tp = ((predictions == truth_label) & (labels == truth_label)).sum().item()
+    fp = ((predictions == truth_label) & (labels != truth_label)).sum().item()
+    fn = ((predictions != truth_label) & (labels == truth_label)).sum().item()
+    tn = ((predictions != truth_label) & (labels != truth_label)).sum().item()
+
+    # Precision, Recall, F1
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+    return {
+        "threshold": threshold,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1
+    }
+
+
+def search_best_threshold(scores, labels, threshold_granularity=100, smaller_scores_better=False, truth_label=1,
+                          determined_metric="F1"):
+    """Search for the threshold that maximizes a specific metric."""
+    best_metric_value = -float('inf')
+    best_results = None
+
+    start = int(scores.min().item() * threshold_granularity)
+    end = int(scores.max().item() * threshold_granularity) + 1
+
+    for t in range(start, end):
+        threshold = t / threshold_granularity
+        results = evaluate_by_threshold(scores, labels, threshold, smaller_scores_better, truth_label)
+
+        if results[determined_metric] > best_metric_value:
+            best_metric_value = results[determined_metric]
+            best_results = results
+
+    return best_results
+
 def optimise_mamba(lookback, dim_in, d_conv, d_state, dropout, lr, weight_decay, walk_length):
     # Create dataset
     dataset = RMDataset(data, lookback, walk_length)
@@ -305,8 +349,8 @@ def optimise_mamba(lookback, dim_in, d_conv, d_state, dropout, lr, weight_decay,
                                  lr=lr, weight_decay=weight_decay)
 
     # Set weights for the loss components.
-    alpha = 0.3  # weighting for the triplet loss
-    beta = 0.7  # weighting for the link prediction (BCE) loss
+    alpha = 0.5  # weighting for the triplet loss
+    beta = 0.5  # weighting for the link prediction (BCE) loss
 
     epochs = 50
     val_losses = []
@@ -334,11 +378,18 @@ def optimise_mamba(lookback, dim_in, d_conv, d_state, dropout, lr, weight_decay,
 
             # 1. Compute triplet loss for embedding learning
             triplet_tensor = torch.tensor(triplet, dtype=torch.int64).to(device)
-            loss_triplet = build_loss(triplet_tensor, scale, mu, sigma, 64, scale=False)
+            # Replace the triplet loss calculation with:
+            # Extract anchor, positive, and negative embeddings
+            anchors = mu[triplet_tensor[:, 0]]
+            positives = mu[triplet_tensor[:, 1]]
+            negatives = mu[triplet_tensor[:, 2]]
+
+            # Compute triplet loss
+            loss_triplet = triplet_loss(anchors, positives, negatives, margin=1.0)
 
             # 2. Compute link prediction loss using the link predictor:
             # Convert triplets to a tensor (each row: [anchor, positive, negative])
-            triplet_tensor = torch.tensor(triplet, dtype=torch.long).to(device)
+
             # Positive pairs: (anchor, positive)
             pos_pair = triplet_tensor[:, [0, 1]]
             # Negative pairs: (anchor, negative)
@@ -365,94 +416,131 @@ def optimise_mamba(lookback, dim_in, d_conv, d_state, dropout, lr, weight_decay,
             clip_grad_norm_(list(model.parameters()) + list(link_predictor.parameters()), max_norm=1.0)
             optimizer.step()
 
-        # Validation loop over snapshots 63 to 72 (using triplet loss as the evaluation metric)
-        val_loss_value = 0.0
-        val_samples = 0
-        with torch.no_grad():
-            model.eval()
-            link_predictor.eval()
-            for i in range(63, 72):
-                x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-                x = x.clone().detach().to(device)
-                _, mu, sigma = model(x)
-                triplet_tensor = torch.tensor(triplet, dtype=torch.int64).to(device)
+        if (e+1) % 5 == 0:
+            # Validation loop over snapshots 63 to 72 (using triplet loss as the evaluation metric)
+            val_loss_value = 0.0
+            val_samples = 0
+            with torch.no_grad():
+                model.eval()
+                link_predictor.eval()
+                for i in range(63, 72):
+                    x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+                    x = x.clone().detach().to(device)
+                    _, mu, sigma = model(x)
+                    triplet_tensor = torch.tensor(triplet, dtype=torch.int64).to(device)
+                    # Replace the triplet loss calculation with:
+                    # Extract anchor, positive, and negative embeddings
+                    anchors = mu[triplet_tensor[:, 0]]
+                    positives = mu[triplet_tensor[:, 1]]
+                    negatives = mu[triplet_tensor[:, 2]]
 
-                curr_val_loss = build_loss(triplet_tensor, scale, mu, sigma, 64, scale=False).item()
-                val_loss_value += curr_val_loss
-                val_samples += 1
-            val_loss_value /= val_samples
-        val_losses.append(val_loss_value)
-        train_loss.append(np.mean(np.stack(loss_step)))
+                    # Compute triplet loss
+                    curr_val_loss = triplet_loss(anchors, positives, negatives, margin=1.0)
 
-        # Testing loop over snapshots 72 to 90 (using triplet loss as the evaluation metric)
-        test_loss_value = 0.0
-        test_samples = 0
-        with torch.no_grad():
-            model.eval()
-            link_predictor.eval()
-            for i in range(72, 90):
-                x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-                x = x.clone().detach().to(device)
-                _, mu, sigma = model(x)
-                triplet_tensor = torch.tensor(triplet, dtype=torch.int64).to(device)
-                curr_test_loss = build_loss(triplet_tensor, scale, mu, sigma, 64, scale=False).item()
-                test_loss_value += curr_test_loss
-                test_samples += 1
-            test_loss_value /= test_samples
-        test_loss.append(test_loss_value)
+                    val_loss_value += curr_val_loss
+                    val_samples += 1
+                val_loss_value /= val_samples
+            val_losses.append(val_loss_value)
+            train_loss.append(np.mean(np.stack(loss_step)))
 
-        # Calculate MAP using the built-in average_precision_score for snapshots lookback to 90.
-        # Here we evaluate on both the positive and negative link predictions.
-        ap_list = []
-        with torch.no_grad():
-            model.eval()
-            link_predictor.eval()
-            for i in range(lookback, 90):
-                x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-                x = x.clone().detach().to(device)
-                _, mu, sigma = model(x)
+            # Testing loop over snapshots 72 to 90 (using triplet loss as the evaluation metric)
+            test_loss_value = 0.0
+            test_samples = 0
+            with torch.no_grad():
+                model.eval()
+                link_predictor.eval()
+                for i in range(72, 90):
+                    x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+                    x = x.clone().detach().to(device)
+                    _, mu, sigma = model(x)
+                    triplet_tensor = torch.tensor(triplet, dtype=torch.int64).to(device)
+                    # Replace the triplet loss calculation with:
+                    # Extract anchor, positive, and negative embeddings
+                    anchors = mu[triplet_tensor[:, 0]]
+                    positives = mu[triplet_tensor[:, 1]]
+                    negatives = mu[triplet_tensor[:, 2]]
 
-                # Convert triplets to tensor.
-                triplet_tensor = torch.tensor(triplet, dtype=torch.long).to(device)
-                pos_pair = triplet_tensor[:, [0, 1]]
-                neg_pair = triplet_tensor[:, [0, 2]]
+                    # Compute triplet loss
+                    curr_test_loss = triplet_loss(anchors, positives, negatives, margin=1.0)
 
-                # Get predicted probabilities for both positive and negative pairs.
-                pred_pos = link_predictor(mu[pos_pair[:, 0]], mu[pos_pair[:, 1]]).squeeze().cpu().numpy()
-                pred_neg = link_predictor(mu[neg_pair[:, 0]], mu[neg_pair[:, 1]]).squeeze().cpu().numpy()
+                    test_loss_value += curr_test_loss
+                    test_samples += 1
+                test_loss_value /= test_samples
+            test_loss.append(test_loss_value)
 
-                # Construct ground-truth labels.
-                labels_pos = np.ones_like(pred_pos)
-                labels_neg = np.zeros_like(pred_neg)
+            # Calculate MAP using the built-in average_precision_score for snapshots lookback to 90.
+            # Here we evaluate on both the positive and negative link predictions.
+            # Add this to your optimise_mamba function where MAP is calculated
+            ap_list = []
+            f1_list = []  # Track F1 scores
+            best_thresholds = []  # Track best thresholds
 
-                preds = np.concatenate([pred_pos, pred_neg])
-                labels = np.concatenate([labels_pos, labels_neg])
+            with torch.no_grad():
+                model.eval()
+                link_predictor.eval()
+                for i in range(lookback, 90):
+                    x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+                    x = x.clone().detach().to(device)
+                    _, mu, sigma = model(x)
 
-                # Skip calculation if we have less than two unique labels.
-                if len(np.unique(labels)) < 2:
-                    continue
-                ap = average_precision_score(labels, preds)
-                ap_list.append(ap)
+                    # Convert triplets to tensor
+                    triplet_tensor = torch.tensor(triplet, dtype=torch.long).to(device)
+                    pos_pair = triplet_tensor[:, [0, 1]]
+                    neg_pair = triplet_tensor[:, [0, 2]]
 
-        # Compute mean average precision across evaluated snapshots.
-        if len(ap_list) > 0:
-            curr_MAP = np.mean(ap_list)
-        else:
-            curr_MAP = 0
+                    # Get predicted probabilities
+                    pred_pos = link_predictor(mu[pos_pair[:, 0]], mu[pos_pair[:, 1]]).squeeze().cpu()
+                    pred_neg = link_predictor(mu[neg_pair[:, 0]], mu[neg_pair[:, 1]]).squeeze().cpu()
 
-        # Check if the current MAP is the best so far.
-        if curr_MAP > best_MAP:
-            best_MAP = curr_MAP
-            best_model = model
-            print("Best MAP:", e, best_MAP)
+                    # Construct predictions and ground-truth labels
+                    preds = torch.cat([pred_pos, pred_neg])
+                    labels = torch.cat([torch.ones_like(pred_pos), torch.zeros_like(pred_neg)])
 
-        # Add this after the MAP calculation at the end of each epoch
-        print(f"Epoch {e + 1}/{epochs}")
-        print(f"Training Loss: {np.mean(np.stack(loss_step)):.4f}")
-        print(f"Validation Loss: {val_loss_value:.4f}")
-        print(f"Test Loss: {test_loss_value:.4f}")
-        print(f"Current MAP: {curr_MAP:.4f}")
-        print("-" * 50)
+                    # Skip calculation if we have less than two unique labels
+                    if len(torch.unique(labels)) < 2:
+                        continue
+
+                    # Calculate MAP
+                    ap = average_precision_score(labels.numpy(), preds.numpy())
+                    ap_list.append(ap)
+
+                    # Find best threshold and calculate F1 score
+                    results = search_best_threshold(
+                        scores=preds,
+                        labels=labels,
+                        threshold_granularity=100,
+                        smaller_scores_better=False,
+                        determined_metric="F1"
+                    )
+
+                    if results:
+                        f1_list.append(results["F1"])
+                        best_thresholds.append(results["threshold"])
+
+            # Compute mean average precision and mean F1 across evaluated snapshots
+            if len(ap_list) > 0:
+                curr_MAP = np.mean(ap_list)
+                curr_F1 = np.mean(f1_list) if len(f1_list) > 0 else 0
+                avg_threshold = np.mean(best_thresholds) if len(best_thresholds) > 0 else 0.5
+            else:
+                curr_MAP = 0
+                curr_F1 = 0
+                avg_threshold = 0.5
+
+            # Print both MAP and F1 values
+            print(f"Epoch {e + 1}/{epochs}")
+            print(f"Training Loss: {np.mean(np.stack(loss_step)):.4f}")
+            print(f"Validation Loss: {val_loss_value:.4f}")
+            print(f"Test Loss: {test_loss_value:.4f}")
+            print(f"Current MAP: {curr_MAP:.4f}")
+            print(f"Current F1: {curr_F1:.4f} (threshold: {avg_threshold:.2f})")
+            print("-" * 50)
+
+            # Check if the current MAP is the best so far
+            if curr_MAP > best_MAP:
+                best_MAP = curr_MAP
+                best_model = model
+                print(f"New Best MAP: {best_MAP:.4f} (F1: {curr_F1:.4f})")
     return best_model, val_losses, train_loss, test_loss
 
 
