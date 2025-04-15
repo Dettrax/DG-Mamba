@@ -239,25 +239,49 @@ import numpy as np
 from sklearn.metrics import average_precision_score
 
 
+class TransformerBlock(nn.Module):
+    def __init__(self, hidden_dim, num_heads, dropout=0.2):
+        super().__init__()
+        self.attention = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads, dropout=dropout,
+                                               batch_first=True)
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        self.norm2 = nn.LayerNorm(hidden_dim)
+
+    def forward(self, x):
+        # Self-attention
+        attn_output, _ = self.attention(x, x, x)
+        x = self.norm1(x + attn_output)
+        # Feed-forward network
+        ff_output = self.ff(x)
+        x = self.norm2(x + ff_output)
+        return x
+
+
 class NodeEmbedder(nn.Module):
-    def __init__(self, num_nodes=96, hidden_dim=64, num_heads=4, dropout=0.2):
+    def __init__(self, num_nodes=96, hidden_dim=64, num_heads=4, dropout=0.2, num_layers=3):
         super().__init__()
         self.hidden_dim = hidden_dim
 
-        # Graph structure processing
-        self.embedding = nn.Embedding(num_nodes, hidden_dim)
-
-        # Multihead attention for temporal modeling
-        self.temporal_attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True
+        # Graph structure processing (can use a deeper version here if desired)
+        self.graph_encoder = nn.Sequential(
+            nn.Linear(num_nodes, hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim)
         )
 
-        # Layer norm for attention
-        self.norm1 = nn.LayerNorm(hidden_dim)
+        # Stack of transformer blocks for temporal modeling
+        self.transformer_blocks = nn.ModuleList([
+            TransformerBlock(hidden_dim, num_heads, dropout) for _ in range(num_layers)
+        ])
 
+        # Post processing
         self.post_process = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
@@ -266,37 +290,28 @@ class NodeEmbedder(nn.Module):
         )
 
     def forward(self, history_graphs):
-        batch_size = history_graphs.size(0)
-        seq_len = history_graphs.size(1)
-        num_nodes = history_graphs.size(2)
+        batch_size, seq_len, num_nodes = history_graphs.shape[:3]
 
-        # Create a tensor of node indices: [0, 1, 2, ..., num_nodes-1]
-        node_ids = torch.arange(num_nodes, device=history_graphs.device)
-        # Expand dimensions to match (batch_size, seq_len, num_nodes)
-        node_ids = node_ids.unsqueeze(0).unsqueeze(0)
-        node_ids = node_ids.expand(batch_size, seq_len, num_nodes)
+        # Process graph structure
+        graph_embeddings = self.graph_encoder(history_graphs.view(-1, num_nodes))
+        graph_embeddings = graph_embeddings.view(batch_size, seq_len, num_nodes, self.hidden_dim)
 
-        # Lookup node embeddings (each of shape hidden_dim)
-        # Output shape: (batch_size, seq_len, num_nodes, hidden_dim)
-        graph_embeddings = self.embedding(node_ids)
-
-        # Reshape for temporal attention (batch_size, seq_len, num_nodes, hidden_dim)
-        # -> (batch_size * num_nodes, seq_len, hidden_dim)
+        # Reshape for temporal attention: (batch_size, num_nodes, seq_len, hidden_dim)
         embeddings = graph_embeddings.permute(0, 2, 1, 3).contiguous()
         embeddings = embeddings.view(batch_size * num_nodes, seq_len, self.hidden_dim)
 
-        # Self-attention on the temporal dimension
-        attn_output, _ = self.temporal_attention(
-            embeddings, embeddings, embeddings
-        )
+        # Pass through stacked transformer layers
+        for block in self.transformer_blocks:
+            embeddings = block(embeddings)
 
         # Get final timestep embedding and reshape back
         node_embeddings = embeddings[:, -1, :].view(batch_size, num_nodes, self.hidden_dim)
-
-        # Post-process embeddings
         node_embeddings = self.post_process(node_embeddings)
 
         return node_embeddings
+
+
+
 
 class LinkPredictor(nn.Module):
     def __init__(self, embedding_dim=64):
@@ -327,10 +342,14 @@ class LinkPredictor(nn.Module):
 
 
 def triplet_loss(anchor_embed, pos_embed, neg_embed, margin=1.0):
-    pos_dist = torch.norm(anchor_embed - pos_embed, dim=-1)
-    neg_dist = torch.norm(anchor_embed - neg_embed, dim=-1)
-    loss = torch.clamp(pos_dist - neg_dist + margin, min=0.0)
-    return loss.mean()
+    # Compute pairwise distances
+    distance_positive = F.pairwise_distance(anchor_embed, pos_embed, p=2)
+    distance_negative = F.pairwise_distance(anchor_embed, neg_embed, p=2)
+
+    # Compute the basic triplet loss
+    losses = torch.relu(distance_positive - distance_negative + margin)
+    # Return the average loss across the batch
+    return losses.mean()
 
 
 import torch
@@ -384,7 +403,7 @@ def sample_triplets(adjacency, embeddings, num_samples=1000, k_hop=2):
 
 
 def train_embedder(model, train_loader, epochs=50, device='cuda'):
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.005,weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.002,weight_decay=1e-4)
     model.train()
 
     for epoch in range(epochs):
@@ -416,11 +435,60 @@ def train_embedder(model, train_loader, epochs=50, device='cuda'):
     return model
 
 
-def train_link_predictor(embedder, link_predictor, train_loader,test_loader, epochs=50, device='cuda'):
-    optimizer = torch.optim.Adam(link_predictor.parameters(), lr=0.005,weight_decay=1e-4)
+from sklearn.metrics import f1_score, precision_score, recall_score
+
+
+def evaluate_by_threshold(scores, labels, threshold, smaller_scores_better=False, truth_label=1):
+    """Evaluate predictions against ground truth using a threshold."""
+    if smaller_scores_better:
+        predictions = (scores <= threshold).int()
+    else:
+        predictions = (scores >= threshold).int()
+
+    # Calculate metrics
+    tp = ((predictions == truth_label) & (labels == truth_label)).sum().item()
+    fp = ((predictions == truth_label) & (labels != truth_label)).sum().item()
+    fn = ((predictions != truth_label) & (labels == truth_label)).sum().item()
+    tn = ((predictions != truth_label) & (labels != truth_label)).sum().item()
+
+    # Precision, Recall, F1
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+    return {
+        "threshold": threshold,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1
+    }
+
+
+def search_best_threshold(scores, labels, threshold_granularity=100, smaller_scores_better=False, truth_label=1,
+                          determined_metric="F1"):
+    """Search for the threshold that maximizes a specific metric."""
+    best_metric_value = -float('inf')
+    best_results = None
+
+    start = int(scores.min().item() * threshold_granularity)
+    end = int(scores.max().item() * threshold_granularity) + 1
+
+    for t in range(start, end):
+        threshold = t / threshold_granularity
+        results = evaluate_by_threshold(scores, labels, threshold, smaller_scores_better, truth_label)
+
+        if results[determined_metric] > best_metric_value:
+            best_metric_value = results[determined_metric]
+            best_results = results
+
+    return best_results
+
+
+def train_link_predictor(embedder, link_predictor, train_loader, test_loader, epochs=50, device='cuda'):
+    optimizer = torch.optim.Adam(link_predictor.parameters(), lr=0.005, weight_decay=1e-4)
     criterion = nn.BCELoss()
-    best_map = 0
-    temp_auc  = 0
+    best_f1 = 0
+    best_threshold = 0.5
 
     for epoch in range(epochs):
         link_predictor.train()
@@ -463,23 +531,37 @@ def train_link_predictor(embedder, link_predictor, train_loader,test_loader, epo
 
         all_preds = np.concatenate([p.reshape(-1) for p in all_preds])
         all_targets = np.concatenate([t.reshape(-1) for t in all_targets])
-        map_score = average_precision_score(all_targets, all_preds)
-        auc_score = roc_auc_score(all_targets, all_preds)
-        if map_score > best_map:
-            best_map = map_score
-            temp_auc = auc_score
 
+        # Handle potential NaN/Inf values and ensure contiguous arrays
+        all_preds = np.nan_to_num(all_preds, nan=0.0, posinf=1.0, neginf=0.0)
+        all_preds = np.ascontiguousarray(all_preds)
+        all_targets = np.ascontiguousarray(all_targets)
+
+        # Convert to PyTorch tensors with explicit dtype
+        scores = torch.tensor(all_preds, dtype=torch.float)
+        labels = torch.tensor(all_targets,dtype=torch.float)
+
+        # Search for best threshold
+        results = search_best_threshold(
+            scores,
+            labels,
+            threshold_granularity=100,
+            smaller_scores_better=False,  # Higher scores are better for link prediction
+            determined_metric="F1"
+        )
+
+        if results and results["F1"] > best_f1:
+            best_f1 = results["F1"]
+            best_threshold = results["threshold"]
 
         if (epoch + 1) % 5 == 0:
             print(f'Epoch {epoch + 1}/{epochs}')
             print(f'Average Loss: {total_loss / len(train_loader):.4f}')
-            print(f'MAP Score: {map_score:.4f}')
-            print(f'Best MAP Score: {best_map:.4f}')
-            print(f'AUC Score: {temp_auc:.4f}')
+            print(f'F1 Score: {results["F1"]:.4f} (threshold: {results["threshold"]:.2f})')
+            print(f'Best F1 Score: {best_f1:.4f} (threshold: {best_threshold:.2f})')
             print('------------------------')
 
-    return link_predictor, best_map
-
+    return link_predictor, best_f1, best_threshold
 
 def main(temporal_data, device='cuda'):
     # Initialize models
@@ -496,23 +578,24 @@ def main(temporal_data, device='cuda'):
     train_data = Subset(temporal_data, train_indices)
     test_data = Subset(temporal_data, test_indices)
 
-    train_loader = DataLoader(train_data, batch_size=256, shuffle=True)
+    train_loader = DataLoader(train_data, batch_size=512, shuffle=True)
     test_loader = DataLoader(test_data, batch_size=128)
 
     # Train embedder using triplet loss
     print("Training embedder...")
-    embedder = train_embedder(embedder, train_loader, epochs=50, device=device)
-
+    embedder = train_embedder(embedder, train_loader, epochs=150, device=device)
 
     # Train link predictor using trained embeddings
     print("\nTraining link predictor...")
-    link_predictor, best_map = train_link_predictor(embedder, link_predictor, train_loader, test_loader,epochs=50, device=device)
+    link_predictor, best_f1, best_threshold = train_link_predictor(embedder, link_predictor, train_loader, test_loader,
+                                                                   epochs=50, device=device)
 
-    return embedder, link_predictor, best_map
+    return embedder, link_predictor, best_f1, best_threshold
+
 
 if __name__ == "__main__":
     # Assuming temporal_data is created using the TemporalGraphDataset class
     temporal_data = create_temporal_dataset(data, time_window=3, predict_window=1)
-    embedder, link_predictor, best_map = main(temporal_data)
-    print(f"Final Best MAP Score: {best_map:.4f}")
+    embedder, link_predictor, best_f1, best_threshold = main(temporal_data)
+    print(f"Final Best F1 Score: {best_f1:.4f} (threshold: {best_threshold:.2f})")
 

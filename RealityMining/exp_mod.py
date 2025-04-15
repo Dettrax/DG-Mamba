@@ -12,7 +12,7 @@ from sklearn.preprocessing import normalize
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils import *
+from maths_utils import *
 from models import *
 from scipy import sparse
 import random

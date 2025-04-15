@@ -231,12 +231,155 @@ def create_temporal_dataset(mit_dataset, time_window=3, predict_window=1):
     return TemporalGraphDataset(mit_dataset, time_window, predict_window)
 # Create temporal dataset
 
-import torch
+from torch_geometric.nn.inits import glorot, zeros
 import torch.nn as nn
 import torch.nn.functional as F
+from torch_scatter import scatter, scatter_add
 from torch.utils.data import Dataset, DataLoader, Subset
 import numpy as np
-from sklearn.metrics import average_precision_score
+from sklearn.metrics import average_precision_score, roc_auc_score
+from torch_geometric.nn.conv import MessagePassing, GATConv
+from torch.nn.parameter import Parameter
+from torch_geometric.utils import add_remaining_self_loops, remove_self_loops, softmax, add_self_loops
+
+
+import geoopt
+manifold = geoopt.manifolds.PoincareBall(c=1/100)
+
+class HypLinear(nn.Module):
+    """
+    Hyperbolic linear layer.
+    """
+
+    def __init__(self, manifold, in_features, out_features, c, dropout=0.2, use_bias=True):
+        super(HypLinear, self).__init__()
+        self.manifold = manifold
+        self.in_features = in_features
+        self.out_features = out_features
+        self.c = c
+        self.dropout = dropout
+        self.use_bias = use_bias
+        self.bias = nn.Parameter(torch.Tensor(out_features), requires_grad=True)
+        self.weight = nn.Parameter(torch.Tensor(out_features, in_features), requires_grad=True)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        glorot(self.weight)
+        zeros(self.bias)
+
+    def forward(self, x):
+        drop_weight = F.dropout(self.weight, p=self.dropout, training=self.training)
+        mv = self.manifold.mobius_matvec(drop_weight, x)
+        res = self.manifold.projx(mv)
+        if self.use_bias:
+            bias = self.bias.view(1, -1)
+            hyp_bias = self.manifold.expmap0(bias)
+            hyp_bias = self.manifold.projx(hyp_bias)
+            res = self.manifold.mobius_add(res, hyp_bias)
+            res = self.manifold.projx(res)
+        return res
+
+    def extra_repr(self):
+        return 'in_features={}, out_features={}, c={}'.format(
+            self.in_features, self.out_features, self.c
+        )
+
+
+class HypAct(nn.Module):
+    """
+    Hyperbolic activation layer.
+    """
+
+    def __init__(self, manifold, c_in, c_out, act):
+        super(HypAct, self).__init__()
+        self.manifold = manifold
+        self.c_in = c_in
+        self.c_out = c_out
+        self.act = act
+
+    def forward(self, x):
+        xt = self.act(self.manifold.logmap0(x))
+        return self.manifold.projx(self.manifold.expmap0(xt))
+
+    def extra_repr(self):
+        return 'c_in={}, c_out={}'.format(
+            self.c_in, self.c_out
+        )
+
+class HypDropout(nn.Module):
+    """
+    Hyperbolic activation layer.
+    """
+
+    def __init__(self, manifold, c_in, c_out, dropout=0.2):
+        super(HypDropout, self).__init__()
+        self.manifold = manifold
+        self.c_in = c_in
+        self.c_out = c_out
+        self.dropout = dropout
+
+    def forward(self, x):
+        xt = F.dropout(self.manifold.logmap0(x), p=self.dropout, training=self.training)
+        return self.manifold.projx(self.manifold.expmap0(xt))
+
+    def extra_repr(self):
+        return 'c_in={}, c_out={}'.format(
+            self.c_in, self.c_out
+        )
+
+
+class HypAttAgg(MessagePassing):
+    def __init__(self, manifold, c, out_features, att_dropout=0.2, heads=4, concat=False):
+        super(HypAttAgg, self).__init__()
+        self.manifold = manifold
+        self.dropout = att_dropout
+        self.out_channels = out_features // heads
+        self.negative_slope = 0.2
+        self.heads = heads
+        self.c = c
+        self.concat = concat
+        self.att_i = Parameter(torch.Tensor(1, heads, self.out_channels), requires_grad=True)
+        self.att_j = Parameter(torch.Tensor(1, heads, self.out_channels), requires_grad=True)
+        glorot(self.att_i)
+        glorot(self.att_j)
+
+    def initHyperX(self, x, c=1/100):
+        return self.toHyperX(x, c)
+
+    def toHyperX(self, x, c=1/100):
+        x_hyp = self.manifold.expmap0(x)
+        x_hyp = self.manifold.projx(x_hyp)
+        return x_hyp
+
+
+    def forward(self, x, edge_index):
+        edge_index, _ = remove_self_loops(edge_index)
+        edge_index, _ = add_self_loops(edge_index,
+                                       num_nodes=x.size(self.node_dim))
+
+        edge_index_i = edge_index[0]
+        edge_index_j = edge_index[1]
+
+        x_tangent0 = self.manifold.logmap0(x)  # project to origin
+        x_i = torch.nn.functional.embedding(edge_index_i, x_tangent0)
+        x_j = torch.nn.functional.embedding(edge_index_j, x_tangent0)
+        x_i = x_i.view(-1, self.heads, self.out_channels)
+        x_j = x_j.view(-1, self.heads, self.out_channels)
+
+        alpha = (x_i * self.att_i).sum(-1) + (x_j * self.att_j).sum(-1)
+
+        alpha = F.leaky_relu(alpha, self.negative_slope)
+        alpha = softmax(alpha, edge_index_i, num_nodes=x_i.size(0))
+        alpha = F.dropout(alpha, self.dropout, training=self.training)
+        support_t = scatter(x_j * alpha.view(-1, self.heads, 1), edge_index_i, dim=0)
+
+        if self.concat:
+            support_t = support_t.view(-1, self.heads * self.out_channels)
+        else:
+            support_t = support_t.mean(dim=1)
+        support_t = self.manifold.projx(self.manifold.expmap0(support_t))
+
+        return support_t
 
 
 class NodeEmbedder(nn.Module):
@@ -246,26 +389,29 @@ class NodeEmbedder(nn.Module):
 
         # Graph structure processing
         self.embedding = nn.Embedding(num_nodes, hidden_dim)
+        self.c = torch.tensor(1/100)
 
         # Multihead attention for temporal modeling
-        self.temporal_attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True
+        self.temporal_attention = HypAttAgg(
+            manifold=manifold,
+            c=self.c ,
+            out_features=hidden_dim,
+            att_dropout=dropout,
+            heads=num_heads,
+            concat=False
         )
 
         # Layer norm for attention
         self.norm1 = nn.LayerNorm(hidden_dim)
 
         self.post_process = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim)
+            HypLinear(manifold=manifold, in_features=hidden_dim//4, out_features=hidden_dim, c=self.c),
+            HypAct(manifold=manifold, c_in=self.c, c_out=self.c, act=nn.SiLU()),
+            HypDropout(manifold=manifold, c_in=self.c, c_out=self.c, dropout=dropout),
+            HypLinear(manifold=manifold, in_features=hidden_dim, out_features=hidden_dim, c=self.c)
         )
 
-    def forward(self, history_graphs):
+    def forward(self, history_graphs,edge_index):
         batch_size = history_graphs.size(0)
         seq_len = history_graphs.size(1)
         num_nodes = history_graphs.size(2)
@@ -278,31 +424,36 @@ class NodeEmbedder(nn.Module):
 
         # Lookup node embeddings (each of shape hidden_dim)
         # Output shape: (batch_size, seq_len, num_nodes, hidden_dim)
-        graph_embeddings = self.embedding(node_ids)
+        x = self.temporal_attention.initHyperX(self.embedding(node_ids))
+        x = x.view(batch_size * seq_len, num_nodes, self.hidden_dim)
 
-        # Reshape for temporal attention (batch_size, seq_len, num_nodes, hidden_dim)
-        # -> (batch_size * num_nodes, seq_len, hidden_dim)
-        embeddings = graph_embeddings.permute(0, 2, 1, 3).contiguous()
-        embeddings = embeddings.view(batch_size * num_nodes, seq_len, self.hidden_dim)
+        out_features = []
+        # Process each graph with the hyper attention module, using the corresponding edge_index.
+        # Here we assume edge_index is provided as a list (or similar indexed structure)
+        for i in range(batch_size * seq_len):
+            # Retrieve the edge_index for the i-th graph and ensure it is on the correct device
+            ei = edge_index[i].to(x.device) if isinstance(edge_index, list) else edge_index[i]
+            # Apply hyper attention message passing: expected input shape (num_nodes, hidden_dim)
+            h = self.temporal_attention(x[i], ei)
+            out_features.append(h)
 
-        # Self-attention on the temporal dimension
-        attn_output, _ = self.temporal_attention(
-            embeddings, embeddings, embeddings
-        )
+        # Stack results and reshape to (batch_size, seq_len, num_nodes, hidden_dim)
+        h = torch.stack(out_features, dim=0)
 
-        # Get final timestep embedding and reshape back
-        node_embeddings = embeddings[:, -1, :].view(batch_size, num_nodes, self.hidden_dim)
+        h = h.view(batch_size, seq_len, num_nodes, self.hidden_dim//4)
 
+        node_embeddings = h[:, -1, :].view(batch_size, num_nodes, self.hidden_dim//4)
         # Post-process embeddings
         node_embeddings = self.post_process(node_embeddings)
 
         return node_embeddings
 
+
 class LinkPredictor(nn.Module):
     def __init__(self, embedding_dim=64):
         super().__init__()
         self.edge_predictor = nn.Sequential(
-            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.Linear(embedding_dim * 2 + 3, embedding_dim),  # Accept 2*embedding_dim + 3 features
             nn.SiLU(),
             nn.Dropout(0.2),
             nn.Linear(embedding_dim, 1),
@@ -310,27 +461,41 @@ class LinkPredictor(nn.Module):
         )
 
     def forward(self, node_embeddings):
+        node_embeddings = manifold.logmap0(node_embeddings)
         batch_size, num_nodes, hidden_dim = node_embeddings.shape
 
         # Create all possible node pairs
         node_i = node_embeddings.unsqueeze(2).expand(-1, -1, num_nodes, -1)
         node_j = node_embeddings.unsqueeze(1).expand(-1, num_nodes, -1, -1)
 
-        # Concatenate node pairs
-        edge_features = torch.cat([node_i, node_j], dim=-1)
+        # Reshape for batch processing
+        node_i_flat = node_i.reshape(batch_size * num_nodes * num_nodes, -1)
+        node_j_flat = node_j.reshape(batch_size * num_nodes * num_nodes, -1)
+
+        # Calculate hyperbolic distances
+        pair_dists = manifold.dist(node_i_flat, node_j_flat)
+        dist0_i = manifold.dist0(node_i_flat)
+        dist0_j = manifold.dist0(node_j_flat)
+
+        # Stack distance features
+        distance_features = torch.stack([pair_dists, dist0_i, dist0_j], dim=1)
+
+        # Concatenate node embeddings with distance features
+        combined_features = torch.cat([node_i_flat, node_j_flat, distance_features], dim=1)
 
         # Predict edge probabilities
-        edge_probs = self.edge_predictor(edge_features.view(-1, hidden_dim * 2))
+        edge_probs = self.edge_predictor(combined_features)
         edge_probs = edge_probs.view(batch_size, num_nodes, num_nodes)
 
         return edge_probs
 
 
+
 def triplet_loss(anchor_embed, pos_embed, neg_embed, margin=1.0):
-    pos_dist = torch.norm(anchor_embed - pos_embed, dim=-1)
-    neg_dist = torch.norm(anchor_embed - neg_embed, dim=-1)
-    loss = torch.clamp(pos_dist - neg_dist + margin, min=0.0)
-    return loss.mean()
+    pos_dist = manifold.dist(anchor_embed, pos_embed)
+    neg_dist = manifold.dist(anchor_embed, neg_embed)
+    cluster_triplet_loss = F.relu(pos_dist - neg_dist + margin)
+    return cluster_triplet_loss.mean()
 
 
 import torch
@@ -383,6 +548,36 @@ def sample_triplets(adjacency, embeddings, num_samples=1000, k_hop=2):
     return [torch.cat(t) for t in zip(*triplets)]
 
 
+def create_edge_index_from_tensor(adj):
+    """
+    Given an adjacency matrix tensor `adj` of shape (num_nodes, num_nodes),
+    this function returns the edge_index tensor of shape [2, num_edges].
+
+    Assumes that a positive value in `adj` indicates an edge.
+    """
+    # Create a boolean mask where there is an edge (adjust threshold as needed)
+    mask = adj > 0
+    # Get the indices of the nonzero elements; result shape is (num_edges, 2)
+    edge_index = mask.nonzero(as_tuple=False).t().contiguous()
+    return edge_index
+
+
+
+def create_edge_index_list(history_graphs):
+    """
+    Given a history_graphs tensor of shape (batch_size, seq_len, num_nodes, num_nodes),
+    returns a list of edge_index tensors, one for each graph in the batch and temporal sequence.
+    """
+    batch_size, seq_len, num_nodes, _ = history_graphs.size()
+    edge_index_list = []
+    for b in range(batch_size):
+        for t in range(seq_len):
+            adj = history_graphs[b, t]
+            edge_index = create_edge_index_from_tensor(adj)
+            edge_index_list.append(edge_index)
+    return edge_index_list
+
+
 def train_embedder(model, train_loader, epochs=50, device='cuda'):
     optimizer = torch.optim.Adam(model.parameters(), lr=0.005,weight_decay=1e-4)
     model.train()
@@ -393,10 +588,11 @@ def train_embedder(model, train_loader, epochs=50, device='cuda'):
         for batch in train_loader:
             history_graphs = batch['history_graphs'].to(device)
             target = batch['target'].squeeze(1).to(device)
+            edge_index_list = create_edge_index_list(history_graphs)
 
 
             # Get node embeddings
-            embeddings = model(history_graphs)
+            embeddings = model(history_graphs,edge_index_list)
 
             # Sample triplets
             anchors, positives, negatives = sample_triplets(target, embeddings)
@@ -429,10 +625,11 @@ def train_link_predictor(embedder, link_predictor, train_loader,test_loader, epo
         for batch in train_loader:
             history_graphs = batch['history_graphs'].to(device)
             target = batch['target'].squeeze(1).to(device)
+            edge_index_list = create_edge_index_list(history_graphs)
 
             # Get embeddings from trained embedder
             with torch.no_grad():
-                embeddings = embedder(history_graphs)
+                embeddings = embedder(history_graphs,edge_index_list)
 
             # Predict links
             pred = link_predictor(embeddings)
@@ -454,8 +651,9 @@ def train_link_predictor(embedder, link_predictor, train_loader,test_loader, epo
             for batch in test_loader:
                 history_graphs = batch['history_graphs'].to(device)
                 target = batch['target'].squeeze(1).to(device)
+                edge_index_list = create_edge_index_list(history_graphs)
 
-                embeddings = embedder(history_graphs)
+                embeddings = embedder(history_graphs,edge_index_list)
                 pred = link_predictor(embeddings)
 
                 all_preds.append(pred.cpu().numpy())
@@ -496,7 +694,7 @@ def main(temporal_data, device='cuda'):
     train_data = Subset(temporal_data, train_indices)
     test_data = Subset(temporal_data, test_indices)
 
-    train_loader = DataLoader(train_data, batch_size=256, shuffle=True)
+    train_loader = DataLoader(train_data, batch_size=128, shuffle=True)
     test_loader = DataLoader(test_data, batch_size=128)
 
     # Train embedder using triplet loss

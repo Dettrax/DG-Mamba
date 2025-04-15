@@ -13,7 +13,7 @@ try :
     sys.path.append(os.getcwd())
 except:
     pass
-from maths_utils import *
+from utils import *
 import pickle
 import json
 from eval_mod import get_MAP_avg
@@ -242,106 +242,218 @@ class MambaG2G(torch.nn.Module):
         return x, mu, sigma
 
 
-def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_length):
+class LinkPredictor(nn.Module):
+    def __init__(self, in_channels, hidden_channels, dropout=0.2):
+        super(LinkPredictor, self).__init__()
+        self.fc1 = nn.Linear(2 * in_channels, hidden_channels)
+        self.fc2 = nn.Linear(hidden_channels, 1)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, emb_i, emb_j):
+        # Concatenate the embeddings of the two nodes
+        x = torch.cat([emb_i, emb_j], dim=-1)
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return torch.sigmoid(x)
 
 
+from sklearn.metrics import average_precision_score  # Built-in MAP computation
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn.utils import clip_grad_norm_
+from tqdm import tqdm
+
+
+def optimise_mamba(lookback, dim_in, d_conv, d_state, dropout, lr, weight_decay, walk_length):
     # Create dataset
-    dataset = RMDataset(data, lookback,walk_length)
+    dataset = RMDataset(data, lookback, walk_length)
     config = {
-        'd_model':96,
-        'd_state':d_state,
-        'd_conv':d_conv
+        'd_model': 96,
+        'd_state': d_state,
+        'd_conv': d_conv
     }
 
+    # Instantiate your main model (MambaG2G) and move to device
     model = MambaG2G(config, dim_in, 64, dropout=dropout).to(device)
-    #print total model parameters
     print('Total parameters:', sum(p.numel() for p in model.parameters()))
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    # Define parameters
-    epochs = 5
-    # To store A matrices across timestamps and epochs
+
+    # Define the link prediction head.
+    # This head takes two node embeddings (e.g., mu) and outputs a probability.
+    class LinkPredictor(nn.Module):
+        def __init__(self, in_channels, hidden_channels, dropout=0.2):
+            super(LinkPredictor, self).__init__()
+            self.fc1 = nn.Linear(2 * in_channels, hidden_channels)
+            self.fc2 = nn.Linear(hidden_channels, 1)
+            self.dropout = nn.Dropout(dropout)
+
+        def forward(self, emb_i, emb_j):
+            # Concatenate the embeddings for each node pair along the feature dimension.
+            x = torch.cat([emb_i, emb_j], dim=-1)
+            x = F.relu(self.fc1(x))
+            x = self.dropout(x)
+            x = self.fc2(x)
+            return torch.sigmoid(x)
+
+    # Instantiate the link predictor (using 64 as the input node embedding dimension)
+    link_predictor = LinkPredictor(in_channels=64, hidden_channels=32, dropout=dropout).to(device)
+
+    # Merge parameters from both models into one optimizer.
+    optimizer = torch.optim.Adam(list(model.parameters()) + list(link_predictor.parameters()),
+                                 lr=lr, weight_decay=weight_decay)
+
+    # Set weights for the loss components.
+    alpha = 0.3  # weighting for the triplet loss
+    beta = 0.7  # weighting for the link prediction (BCE) loss
+
+    epochs = 50
     val_losses = []
     train_loss = []
     test_loss = []
     best_MAP = 0
     best_model = None
+
     for e in tqdm(range(epochs)):
         model.train()
+        link_predictor.train()
         loss_step = []
+
+        # Training loop over snapshots in the training period
         for i in range(lookback, 63):
-                x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-                optimizer.zero_grad()
-                x = x.clone().detach().requires_grad_(True).to(device)
-                _,mu, sigma = model(x)
-                loss = build_loss(triplet, scale, mu, sigma, 64, scale=False)
-
-                loss_step.append(loss.cpu().detach().numpy())
-                loss.backward()
-                clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-
-    val_loss_value = 0.0
-    val_samples = 0
-
-    with torch.no_grad():
-        model.eval()
-        for i in range(63, 72):
+            # Get one time snapshot from the dataset.
             x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
             optimizer.zero_grad()
-            x = x.clone().detach().requires_grad_(False).to(device)
-            _,mu, sigma = model(x)
-            curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
-            val_loss_value += curr_val_loss
 
-            val_samples += 1
-        val_loss_value /= val_samples
-    # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} Val Loss: {val_loss_value}")
-    val_losses.append(val_loss_value)
-    train_loss.append(np.mean(np.stack(loss_step)))
-    val_loss_value = 0.0
-    val_samples = 0
-    with torch.no_grad():
-        model.eval()
-        for i in range(72, 90):
-            x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-            optimizer.zero_grad()
-            x = x.clone().detach().requires_grad_(False).to(device)
+            # Move input to device
+            x = x.clone().detach().requires_grad_(True).to(device)
+
+            # Forward pass: obtain node embeddings along with mu and sigma.
             _, mu, sigma = model(x)
-            curr_val_loss = build_loss(triplet, scale, mu, sigma, 64, scale=False).item()
-            val_loss_value += curr_val_loss
 
-            val_samples += 1
-        val_loss_value /= val_samples
-    test_loss.append(val_loss_value)
-    # print(f"Epoch {e} Loss: {np.mean(np.stack(loss_step))} TEst Loss: {val_loss_value}")
-    if e %(epochs-1) ==0:
-        mu_timestamp = []
-        sigma_timestamp = []
+            # 1. Compute triplet loss for embedding learning
+            triplet_tensor = torch.tensor(triplet, dtype=torch.int64).to(device)
+            loss_triplet = build_loss(triplet_tensor, scale, mu, sigma, 64, scale=False)
+
+            # 2. Compute link prediction loss using the link predictor:
+            # Convert triplets to a tensor (each row: [anchor, positive, negative])
+            triplet_tensor = torch.tensor(triplet, dtype=torch.long).to(device)
+            # Positive pairs: (anchor, positive)
+            pos_pair = triplet_tensor[:, [0, 1]]
+            # Negative pairs: (anchor, negative)
+            neg_pair = triplet_tensor[:, [0, 2]]
+
+            # Use the node embeddings (here, mu) for link prediction.
+            pred_pos = link_predictor(mu[pos_pair[:, 0]], mu[pos_pair[:, 1]])
+            pred_neg = link_predictor(mu[neg_pair[:, 0]], mu[neg_pair[:, 1]])
+
+            # Create target labels: ones for positive pairs, zeros for negative.
+            label_pos = torch.ones_like(pred_pos)
+            label_neg = torch.zeros_like(pred_neg)
+
+            # Compute BCE loss for positive and negative predictions.
+            loss_bce_pos = F.binary_cross_entropy(pred_pos, label_pos)
+            loss_bce_neg = F.binary_cross_entropy(pred_neg, label_neg)
+            loss_bce = loss_bce_pos + loss_bce_neg
+
+            # Combine the losses into one joint loss.
+            joint_loss = alpha * loss_triplet + beta * loss_bce
+            loss_step.append(joint_loss.cpu().detach().numpy())
+
+            joint_loss.backward()
+            clip_grad_norm_(list(model.parameters()) + list(link_predictor.parameters()), max_norm=1.0)
+            optimizer.step()
+
+        # Validation loop over snapshots 63 to 72 (using triplet loss as the evaluation metric)
+        val_loss_value = 0.0
+        val_samples = 0
         with torch.no_grad():
             model.eval()
+            link_predictor.eval()
+            for i in range(63, 72):
+                x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+                x = x.clone().detach().to(device)
+                _, mu, sigma = model(x)
+                triplet_tensor = torch.tensor(triplet, dtype=torch.int64).to(device)
+
+                curr_val_loss = build_loss(triplet_tensor, scale, mu, sigma, 64, scale=False).item()
+                val_loss_value += curr_val_loss
+                val_samples += 1
+            val_loss_value /= val_samples
+        val_losses.append(val_loss_value)
+        train_loss.append(np.mean(np.stack(loss_step)))
+
+        # Testing loop over snapshots 72 to 90 (using triplet loss as the evaluation metric)
+        test_loss_value = 0.0
+        test_samples = 0
+        with torch.no_grad():
+            model.eval()
+            link_predictor.eval()
+            for i in range(72, 90):
+                x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+                x = x.clone().detach().to(device)
+                _, mu, sigma = model(x)
+                triplet_tensor = torch.tensor(triplet, dtype=torch.int64).to(device)
+                curr_test_loss = build_loss(triplet_tensor, scale, mu, sigma, 64, scale=False).item()
+                test_loss_value += curr_test_loss
+                test_samples += 1
+            test_loss_value /= test_samples
+        test_loss.append(test_loss_value)
+
+        # Calculate MAP using the built-in average_precision_score for snapshots lookback to 90.
+        # Here we evaluate on both the positive and negative link predictions.
+        ap_list = []
+        with torch.no_grad():
+            model.eval()
+            link_predictor.eval()
             for i in range(lookback, 90):
                 x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-                x = x.clone().detach().requires_grad_(True).to(device)
+                x = x.clone().detach().to(device)
                 _, mu, sigma = model(x)
-                mu_timestamp.append(mu.cpu().detach().numpy())
-                sigma_timestamp.append(sigma.cpu().detach().numpy())
 
-        # Save mu and sigma matrices
-        name = 'Results/RealityMining'
-        save_sigma_mu = True
-        sigma_L_arr = []
-        mu_L_arr = []
-        if save_sigma_mu == True:
-            sigma_L_arr.append(sigma_timestamp)
-            mu_L_arr.append(mu_timestamp)
-        curr_MAP ,_ = get_MAP_avg(mu_L_arr,lookback,data)
+                # Convert triplets to tensor.
+                triplet_tensor = torch.tensor(triplet, dtype=torch.long).to(device)
+                pos_pair = triplet_tensor[:, [0, 1]]
+                neg_pair = triplet_tensor[:, [0, 2]]
+
+                # Get predicted probabilities for both positive and negative pairs.
+                pred_pos = link_predictor(mu[pos_pair[:, 0]], mu[pos_pair[:, 1]]).squeeze().cpu().numpy()
+                pred_neg = link_predictor(mu[neg_pair[:, 0]], mu[neg_pair[:, 1]]).squeeze().cpu().numpy()
+
+                # Construct ground-truth labels.
+                labels_pos = np.ones_like(pred_pos)
+                labels_neg = np.zeros_like(pred_neg)
+
+                preds = np.concatenate([pred_pos, pred_neg])
+                labels = np.concatenate([labels_pos, labels_neg])
+
+                # Skip calculation if we have less than two unique labels.
+                if len(np.unique(labels)) < 2:
+                    continue
+                ap = average_precision_score(labels, preds)
+                ap_list.append(ap)
+
+        # Compute mean average precision across evaluated snapshots.
+        if len(ap_list) > 0:
+            curr_MAP = np.mean(ap_list)
+        else:
+            curr_MAP = 0
+
+        # Check if the current MAP is the best so far.
         if curr_MAP > best_MAP:
             best_MAP = curr_MAP
             best_model = model
-            # torch.save(model.state_dict(), 'best_model.pth')
-            print("Best MAP: ",e, best_MAP,sep=" ")
+            print("Best MAP:", e, best_MAP)
 
-    return best_model , val_losses , train_loss , test_loss
+        # Add this after the MAP calculation at the end of each epoch
+        print(f"Epoch {e + 1}/{epochs}")
+        print(f"Training Loss: {np.mean(np.stack(loss_step)):.4f}")
+        print(f"Validation Loss: {val_loss_value:.4f}")
+        print(f"Test Loss: {test_loss_value:.4f}")
+        print(f"Current MAP: {curr_MAP:.4f}")
+        print("-" * 50)
+    return best_model, val_losses, train_loss, test_loss
 
 
 # Train/Val/Test split
@@ -362,63 +474,8 @@ def optimise_mamba(lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay,walk_l
 #     test_data[i] = test.to(device)
 #
 
-
-lookback = 2
+lookback = 4
 walk = 16
-model , val_losses , loss_step , test_loss = optimise_mamba(lookback=lookback,dim_in=76,d_conv=9,d_state=6,dropout=0.4285,lr=0.000120,weight_decay=2.4530158734036414e-05,walk_length=walk)
+model , val_losses , loss_step , test_loss = optimise_mamba(lookback=lookback,dim_in=64,d_conv=3,d_state=16,dropout=0.4285,lr=1e-4,weight_decay=1e-4,walk_length=walk)
 
 
-# model , val_losses , loss_step = optimise_mamba(lookback=lookback,window_size=96,stride=1,channel=8,pe_dim=6,num_layers=2,d_conv=4,d_state=4,dropout=0.4,lr=0.002,weight_decay=0.004,walk_length=walk)
-
-#pplot loss
-#add legend
-# y title and x title for loss vs epoch
-# from matplotlib import pyplot as plt
-# plt.semilogy(val_losses)
-# plt.semilogy(loss_step)
-# plt.semilogy(test_loss)
-# plt.legend(['Validation Loss','Training Loss','Test Loss'])
-# plt.xlabel('Epoch')
-# plt.ylabel('Loss')
-# plt.show()
-
-dataset = RMDataset(data, lookback, walk)
-#read the best_model.pt
-# model.load_state_dict(torch.load('best_model.pth'))
-mu_timestamp = []
-sigma_timestamp = []
-with torch.no_grad():
-    model.eval()
-    for i in range(lookback, 90):
-        x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-        x = x.clone().detach().requires_grad_(True).to(device)
-        _, mu, sigma = model(x)
-        mu_timestamp.append(mu.cpu().detach().numpy())
-        sigma_timestamp.append(sigma.cpu().detach().numpy())
-name = 'Results/RealityMining'
-save_sigma_mu = True
-sigma_L_arr = []
-mu_L_arr = []
-if save_sigma_mu == True:
-    sigma_L_arr.append(sigma_timestamp)
-    mu_L_arr.append(mu_timestamp)
-
-import time
-start = time.time()
-MAPS = []
-MRR = []
-for i in tqdm(range(5)):
-    curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, lookback,data)
-    MAPS.append(curr_MAP)
-    MRR.append(curr_MRR)
-#print mean and std of map and mrr
-print("Mean MAP: ", np.mean(MAPS))
-print("Mean MRR: ", np.mean(MRR))
-print("Std MAP: ", np.std(MAPS))
-print("Std MRR: ", np.std(MRR))
-print("Time taken: ", time.time() - start)
-
-
-
-
-#{'dim_in': 16, 'num_layers': 8, 'd_conv': 4, 'd_state': 32, 'dropout': 0.1589482867005636, 'lr': 0.0034744871879953997, 'weight_decay': 0.0038647580212313047}

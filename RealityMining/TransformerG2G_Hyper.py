@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import numpy as np
 from matplotlib import pyplot as plt
 from models import *
-from utils import *
+from maths_utils import *
 import pickle
 import json
 import ray
