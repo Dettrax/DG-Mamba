@@ -562,7 +562,7 @@ def optimise_mamba(lookback, dim_in, d_conv, d_state, dropout, lr, weight_decay,
 #     test_data[i] = test.to(device)
 #
 
-lookback = 4
+lookback = 2
 walk = 16
 model , val_losses , loss_step , test_loss = optimise_mamba(lookback=lookback,dim_in=64,d_conv=3,d_state=16,dropout=0.4285,lr=1e-4,weight_decay=1e-4,walk_length=walk)
 
