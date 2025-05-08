@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch_geometric.utils import dense_to_sparse
 import numpy as np
 from matplotlib import pyplot as plt
-from models_transformerg2g import *
+from models_st_transformerg2g import *
 from utils_st_transformerg2g import *
 import pickle
 import json
