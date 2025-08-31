@@ -1,27 +1,28 @@
-#The transformer block is from https://github.com/LiamMaclean216/Pytorch-Transfomer
-#We have modified it to to have only the encoder block, and to have the Graph2Gauss
-#components at the end.
+# The transformer block is from https://github.com/LiamMaclean216/Pytorch-Transfomer
+# We have modified it to to have only the encoder block, and to have the Graph2Gauss
+# components at the end.
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch_geometric.nn import GCNConv
 import numpy as np
 import math
 
+
 def a_norm(Q, K):
-    m = torch.matmul(Q, K.transpose(2,1).float())
+    m = torch.matmul(Q, K.transpose(2, 1).float())
     m /= torch.sqrt(torch.tensor(Q.shape[-1]).float())
-    m = torch.tril(m) #Lower triangular matrix
-    #assign zero values to -inf
-    m[m == 0] = float('-inf')
-    return torch.softmax(m , -1)
+
+    return torch.softmax(m, -1)
 
 
 def attention(Q, K, V):
-    #Attention(Q, K, V) = norm(QK)V
-    a = a_norm(Q, K) #(batch_size, dim_attn, seq_length)
-    attn_weights = a
-    return  torch.matmul(a,  V),attn_weights #(batch_size, seq_length, seq_length)
+    # Attention(Q, K, V) = norm(QK)V
+    a = a_norm(Q, K)  # (batch_size, dim_attn, seq_length)
+
+    return torch.matmul(a, V)  # (batch_size, seq_length, seq_length)
+
 
 class AttentionBlock(torch.nn.Module):
     def __init__(self, dim_val, dim_attn):
@@ -29,85 +30,85 @@ class AttentionBlock(torch.nn.Module):
         self.value = Value(dim_val, dim_val)
         self.key = Key(dim_val, dim_attn)
         self.query = Query(dim_val, dim_attn)
-    
-    def forward(self, x, kv = None):
-        if(kv is None):
-            #Attention with x connected to Q,K and V (For encoder)
+
+    def forward(self, x, kv=None):
+        if (kv is None):
+            # Attention with x connected to Q,K and V (For encoder)
             return attention(self.query(x), self.key(x), self.value(x))
-        
-        #Attention with x as Q, external vector kv as K an V (For decoder)
+
+        # Attention with x as Q, external vector kv as K an V (For decoder)
         return attention(self.query(x), self.key(kv), self.value(kv))
-    
+
+
 class MultiHeadAttentionBlock(torch.nn.Module):
     def __init__(self, dim_val, dim_attn, n_heads):
         super(MultiHeadAttentionBlock, self).__init__()
         self.heads = []
         for i in range(n_heads):
             self.heads.append(AttentionBlock(dim_val, dim_attn))
-        
+
         self.heads = nn.ModuleList(self.heads)
-        
-        self.fc = nn.Linear(n_heads * dim_val, dim_val, bias = False)
-                      
-        
-    def forward(self, x, kv = None):
+
+        self.fc = nn.Linear(n_heads * dim_val, dim_val, bias=False)
+
+    def forward(self, x, kv=None):
         a = []
-        attn_heads =[]
         for h in self.heads:
-            out,attn_weights = h(x, kv = kv)
-            attn_heads.append(attn_weights)
-            a.append(out)
-            
-        a = torch.stack(a, dim = -1) #combine heads
-        a = a.flatten(start_dim = 2) #flatten all head outputs
-        
+            a.append(h(x, kv=kv))
+
+        a = torch.stack(a, dim=-1)  # combine heads
+        a = a.flatten(start_dim=2)  # flatten all head outputs
+
         x = self.fc(a)
-        
-        return x, attn_heads
-    
+
+        return x
+
+
 class Value(torch.nn.Module):
     def __init__(self, dim_input, dim_val):
         super(Value, self).__init__()
         self.dim_val = dim_val
-        
-        self.fc1 = nn.Linear(dim_input, dim_val, bias = False)
-        #self.fc2 = nn.Linear(5, dim_val)
-    
+
+        self.fc1 = nn.Linear(dim_input, dim_val, bias=False)
+        # self.fc2 = nn.Linear(5, dim_val)
+
     def forward(self, x):
         x = self.fc1(x)
-        #x = self.fc2(x)
-        
+        # x = self.fc2(x)
+
         return x
+
 
 class Key(torch.nn.Module):
     def __init__(self, dim_input, dim_attn):
         super(Key, self).__init__()
         self.dim_attn = dim_attn
-        
-        self.fc1 = nn.Linear(dim_input, dim_attn, bias = False)
-        #self.fc2 = nn.Linear(5, dim_attn)
-    
+
+        self.fc1 = nn.Linear(dim_input, dim_attn, bias=False)
+        # self.fc2 = nn.Linear(5, dim_attn)
+
     def forward(self, x):
         x = self.fc1(x)
-        #x = self.fc2(x)
-        
+        # x = self.fc2(x)
+
         return x
+
 
 class Query(torch.nn.Module):
     def __init__(self, dim_input, dim_attn):
         super(Query, self).__init__()
         self.dim_attn = dim_attn
-        
-        self.fc1 = nn.Linear(dim_input, dim_attn, bias = False)
-        #self.fc2 = nn.Linear(5, dim_attn)
-    
+
+        self.fc1 = nn.Linear(dim_input, dim_attn, bias=False)
+        # self.fc2 = nn.Linear(5, dim_attn)
+
     def forward(self, x):
-        
         x = self.fc1(x)
-        #print(x.shape)
-        #x = self.fc2(x)
-        
+        # print(x.shape)
+        # x = self.fc2(x)
+
         return x
+
 
 # https://pytorch.org/tutorials/beginner/transformer_tutorial.html
 class PositionalEncoding(nn.Module):
@@ -116,44 +117,42 @@ class PositionalEncoding(nn.Module):
 
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        
+
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        
+
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        
+
         pe = pe.unsqueeze(0).transpose(0, 1)
-        
+
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        x = x + self.pe[:x.size(1), :]. squeeze(1)
+        x = x + self.pe[:x.size(1), :].squeeze(1)
         return x
 
 
 class EncoderLayer(torch.nn.Module):
-    def __init__(self, dim_val, dim_attn, n_heads = 1):
+    def __init__(self, dim_val, dim_attn, n_heads=1):
         super(EncoderLayer, self).__init__()
-        self.attn = MultiHeadAttentionBlock(dim_val, dim_attn , n_heads)
+        self.attn = MultiHeadAttentionBlock(dim_val, dim_attn, n_heads)
         self.fc1 = nn.Linear(dim_val, dim_val)
         self.fc2 = nn.Linear(dim_val, dim_val)
-        
+
         self.norm1 = nn.LayerNorm(dim_val)
         self.norm2 = nn.LayerNorm(dim_val)
-    
+
     def forward(self, x):
-        a,attn_weights = self.attn(x)
+        a = self.attn(x)
         x = self.norm1(x + a)
-        
+
         a = self.fc1(F.elu(self.fc2(x)))
         x = self.norm2(x + a)
-        
-        return x,attn_weights
+
+        return x
 
 
-    
 def Energy_KL(mu, sigma, pairs, L):
-
     ij_mu = mu[pairs]
     ij_sigma = sigma[pairs]
 
@@ -178,34 +177,65 @@ def build_loss(triplets, scale_terms, mu, sigma, L, scale):
     return loss
 
 
+class GCN(torch.nn.Module):
+    def __init__(self, dim_in, dim_val, dropout_rate=0.5):
+        super(GCN, self).__init__()
+        self.conv1 = GCNConv(dim_in, dim_in)
+        self.conv2 = GCNConv(dim_in, dim_in)
+        self.conv3 = GCNConv(dim_in, dim_val)
+        self.dropout_rate = dropout_rate
+
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index)
+        x = F.tanh(x)
+        x = F.dropout(x, p=self.dropout_rate, training=self.training)
+        x = self.conv2(x, edge_index)
+        x = F.tanh(x)
+        x = F.dropout(x, p=self.dropout_rate, training=self.training)
+        x = self.conv3(x, edge_index)
+        x = F.tanh(x)
+        x = F.dropout(x, p=self.dropout_rate, training=self.training)
+        return x
+
+
 class Graph2Gauss_Torch(nn.Module):
-    def __init__(self, dim_val, dim_attn, dim_in, dim_out, n_encoder_layers = 1, n_heads = 1, lookback = 1):
+    def __init__(self, dim_val, dim_attn, dim_in, dim_out, n_encoder_layers=1, n_heads=1, lookback=1):
         super(Graph2Gauss_Torch, self).__init__()
+
+        self.lookback = lookback
         self.D = 256
 
         self.elu = nn.ELU()
-        
-        #Initiate encoder layers
+
+        self.gcn = GCN(dim_in, dim_val)
+
+        # Initiate encoder layers
         self.encs = nn.ModuleList()
         for i in range(n_encoder_layers):
             self.encs.append(EncoderLayer(dim_val, dim_attn, n_heads))
-        
-        self.pos = PositionalEncoding(dim_val)
-        
-        #Dense layers for managing network inputs and outputs
-        self.enc_input_fc = nn.Linear(dim_in, dim_val)
-        self.out_fc = nn.Linear(dim_val*(lookback+1), self.D)
-        self.sigma_fc=nn.Linear(self.D, dim_out)
-        self.mu_fc  = nn.Linear(self.D, dim_out)
-        self.dropout = nn.Dropout(0.2)
 
-    def forward(self, input):
-        e , attn_weights = self.encs[0](self.pos(self.enc_input_fc(input)))
-        #apply dropout after first layer
-        e = self.dropout(e)
+        self.pos = PositionalEncoding(dim_val)
+
+        # Dense layers for managing network inputs and outputs
+        # self.enc_input_fc = nn.Linear(dim_in, dim_val)
+        self.out_fc = nn.Linear(dim_val * (lookback + 1), self.D)
+        self.sigma_fc = nn.Linear(self.D, dim_out)
+        self.mu_fc = nn.Linear(self.D, dim_out)
+
+    def forward(self, input, edge_list):
+
+        feature_in_list = [input[:, i, :] for i in
+                           range(self.lookback + 1)]  # (96,3,96) --> [(96,96), (96,96), (96,96)]
+        feature_out_list = []
+        for i in range(self.lookback + 1):
+            feature_out_list.append(self.gcn(feature_in_list[i], edge_list[
+                i]))  # [(96,96), (96,96), (96,96)] -->[(96,256), (96,256), (96,256)]
+        feature_out = torch.stack(feature_out_list, dim=1)  # [(96,256), (96,256), (96,256)] --> (96,3,256)
+
+        e = self.encs[0](self.pos(feature_out))
         for enc in self.encs[1:]:
-            e,attn_weights = enc(e)
-        
+            e = enc(e)
+
         x = torch.tanh(self.out_fc(e.flatten(start_dim=1)))
         mu = self.mu_fc(x)
         sigma = self.sigma_fc(x)

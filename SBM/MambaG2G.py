@@ -160,7 +160,7 @@ def optimise_mamba(data,lookback,lin_dim,d_conv,d_state,dropout,lr,weight_decay)
     train_loss = []
     test_loss = []
     best_MAP = 0
-    for e in tqdm(range(50)):
+    for e in tqdm(range(5)):
         model.train()
         loss_step = []
         for i in range(lookback, 35):

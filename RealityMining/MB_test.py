@@ -2,28 +2,18 @@
 # We have used some of the functionalities from Xu, M., Singh, A.V. &
 # Karniadakis G.K. "DynG2G: An efficient Stochastic Graph Embedding
 # Method for Temporal Graphs".
-
-
-
 import torch_geometric.transforms as T
 import os
-import sys
 try :
     os.chdir("RealityMining")
-    sys.path.append(os.getcwd())
 except:
     pass
+from models import *
 from utils_mod import *
 import pickle
 import json
-from eval_mod import get_MAP_avg
-from torch.utils.data import Dataset, DataLoader
-from torch_geometric.utils import dense_to_sparse
-from torch_geometric.data import Data
+from exp_mod import get_MAP_avg
 
-import numpy as np
-from sklearn.metrics import precision_recall_curve
-from sklearn.metrics import auc, precision_recall_curve
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -46,7 +36,7 @@ from torch.nn import (
     ReLU,
     Sequential,
 )
-import numpy as np
+
 from torch_geometric.nn import GINEConv, global_add_pool
 import inspect
 from typing import Any, Dict, Optional
@@ -64,11 +54,10 @@ from torch_geometric.nn.resolver import (
 from torch_geometric.typing import Adj
 from torch_geometric.utils import to_dense_batch
 
-#from mamba_ssm import Mamba
+# from mamba_ssm import Mamba
 from torch_geometric.utils import degree, sort_edge_index
 
 import torch
-import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import torch_geometric.transforms as T
@@ -83,10 +72,6 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(42)
 
 
-
-f = open("config.json")
-config = json.load(f)
-lookback = config["lookback"]
 
 # Check GPU availability
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -189,7 +174,27 @@ class RMDataset(Dataset):
         # pe:       [N, d_pe]   (from AddRandomWalkPE)
         # edge_*:   union graph over the window
         # triplet:  [M, 3],   scale: [M]
-        return x, pe, edge_index, edge_attr, batch, triplet, scale
+        return x, triplet, scale
+
+def get_graph_data(x):
+    x = torch.tensor(x, dtype=torch.float32)
+
+    # Create placeholders for edge_index and edge_attr
+    edge_index_list = []
+    edge_attr_list = []
+
+
+    adj_matrix = x
+    edge_index, edge_attr = dense_to_sparse(adj_matrix)
+    edge_index_list.append(edge_index)
+    edge_attr_list.append(edge_attr)
+
+    edge_index = torch.cat(edge_index_list, dim=1)
+    edge_attr = torch.cat(edge_attr_list, dim=0)
+
+    batch = torch.zeros(x.size(0), dtype=torch.long)
+
+    return x, edge_index, edge_attr, batch
 
 
 # def val_loss(t):
@@ -200,35 +205,30 @@ class RMDataset(Dataset):
 #         l.append(val_l.cpu().detach().numpy())
 #     return np.mean(l)
 
-def Energy_KL(mu, sigma, pairs, L):
-    # pairs: [M,2] (i,j) indices into row-wise embeddings
-    ij_mu = mu[pairs]                          # [M,2,dim]
-    ij_sigma = sigma[pairs]                    # [M,2,dim]
 
-    # KL( N2 || N1 ) with diagonal covariances:
-    # 0.5 * [ sum(s2/s1) + sum((m1-m2)^2/s1) - D - sum log(s2/s1) ]
+def Energy_KL(mu, sigma, pairs, L):
+    ij_mu = mu[pairs]
+    ij_sigma = sigma[pairs]
     sigma_ratio = ij_sigma[:, 1] / (ij_sigma[:, 0] + 1e-14)
-    trace_fac = torch.sum(sigma_ratio, dim=1)
-    log_det = torch.sum(torch.log(sigma_ratio + 1e-14), dim=1)
-    mu_diff_sq = torch.sum((ij_mu[:, 0] - ij_mu[:, 1])**2 / (ij_sigma[:, 0] + 1e-14), dim=1)
+    trace_fac = torch.sum(sigma_ratio, 1)
+    log_det = torch.sum(torch.log(sigma_ratio + 1e-14), 1)
+    mu_diff_sq = torch.sum(torch.square(ij_mu[:, 0] - ij_mu[:, 1]) / (ij_sigma[:, 0] + 1e-14), 1)
     return 0.5 * (trace_fac + mu_diff_sq - L - log_det)
 
-def build_loss(triplets, scale_terms, mu, sigma, L, scale: bool):
-    device = mu.device
-    hop_pos = torch.tensor(triplets[:, [0, 1]], dtype=torch.long, device=device)
-    hop_neg = torch.tensor(triplets[:, [0, 2]], dtype=torch.long, device=device)
+
+# Define loss function
+def build_loss(triplets, scale_terms, mu, sigma, L, scale):
+    hop_pos = torch.stack([torch.tensor(triplets[:, 0]), torch.tensor(triplets[:, 1])], 1).type(torch.int64)
+    hop_neg = torch.stack([torch.tensor(triplets[:, 0]), torch.tensor(triplets[:, 2])], 1).type(torch.int64)
     eng_pos = Energy_KL(mu, sigma, hop_pos, L)
     eng_neg = Energy_KL(mu, sigma, hop_neg, L)
-    energy = eng_pos.square() + torch.exp(-eng_neg)
+    energy = torch.square(eng_pos) + torch.exp(-eng_neg)
     if scale:
-        w = torch.tensor(scale_terms, dtype=torch.float32, device=device)
-        return torch.mean(energy * w)
-    return torch.mean(energy)
+        loss = torch.mean(energy * torch.Tensor(scale_terms).cpu())
+    else:
+        loss = torch.mean(energy)
+    return loss
 
-
-
-from torch.nn import ELU, Dropout, Linear
-import torch.nn.functional as F
 
 class MambaG2G(torch.nn.Module):
     def __init__(self, config, dim_in, dim_out, dropout=0.2):
@@ -253,156 +253,89 @@ class MambaG2G(torch.nn.Module):
         sigma = F.softplus(sigma) + 1e-6       # strictly positive, numerically safe
         return y, mu, sigma
 
-from eval_mod import get_MAP_avg_KL_sym
 
-def optimise_mamba(lookback, dim_in, d_conv, d_state, dropout, lr, weight_decay, walk_length):
+def optimise_mamba(data,lookback,dim_in,d_conv,d_state,dropout,lr,weight_decay):
+
+
     # Create dataset
-    dataset = RMDataset(data, lookback, walk_length)
-    N = int(data[0][0].shape[0])
-    T = len(data)
+    dataset = RMDataset(data, lookback)
+    config = {
+        'd_model':96,
+        'd_state':d_state,
+        'd_conv':d_conv
+    }
+    # hyperparams
+    dim_out = 64
+    dim_in = 96
 
-    # dynamic splits ~70/10/20 (match your 63/72/90 when T=90)
-    train_end = int(0.7 * T)
-    val_end   = int(0.8 * T)
+    dim_val = 64
+    dim_attn = 64
+    lr = 0.0001
 
-    config = {'d_model': N, 'd_state': d_state, 'd_conv': d_conv}
+    n_heads = 1
+    n_encoder_layers = 1
     model = MambaG2G(config, dim_in, 64, dropout=dropout).to(device)
-    random_model = MambaG2G(config, dim_in, 64, dropout=dropout).to(device)
+    #print total model parameters
     print('Total parameters:', sum(p.numel() for p in model.parameters()))
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-
-    epochs = 50
-    val_losses, train_loss, test_loss = [], [], []
-    best_MAP, best_model = -1.0, None
-
-    for e in tqdm(range(1)):
-        random_model.train()
-
-        # -------- Train --------
-        for i in range(lookback, train_end):
-            x, _, _, _, _, triplet, scale = dataset[i]
-            optimizer.zero_grad()
-            x = x.to(device)                                    # no need for requires_grad_(True)
-            _, mu, sigma = random_model(x)
-            loss = build_loss(triplet, scale, mu, sigma, L=64, scale=False)
-            loss.backward()
-            clip_grad_norm_(random_model.parameters(), max_norm=1.0)
-            optimizer.step()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    for e in tqdm(range(epochs)):
+
+    for e in tqdm(range(50)):
         model.train()
-        losses = []
+        loss_step = []
+        for i in range(lookback, 63):
+                x, triplet, scale = dataset[i]
+                optimizer.zero_grad()
+                # x = x.clone().detach().requires_grad_(True).to(device)
+                _,mu, sigma = model(x.to(device))
+                loss = build_loss(triplet, scale, mu, sigma, 64, scale=False)
 
-        # -------- Train --------
-        for i in range(lookback, train_end):
-            x, _, _, _, _, triplet, scale = dataset[i]
-            optimizer.zero_grad()
-            x = x.to(device)                                    # no need for requires_grad_(True)
-            _, mu, sigma = model(x)
-            loss = build_loss(triplet, scale, mu, sigma, L=64, scale=False)
-            loss.backward()
-            clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            losses.append(float(loss.detach().cpu().numpy()))
+                loss_step.append(loss.cpu().detach().numpy())
+                loss.backward()
+                clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+        f_MAP = []
+        if e % 5 == 0:
+            for i in range(1):
+                mu_timestamp = []
+                sigma_timestamp = []
+                with torch.no_grad():
+                    model.eval()
+                    for i in range(lookback, 90):
+                        x, triplet, scale = dataset[i]
+                        x = x.clone().detach().requires_grad_(False).to(device)
+                        _, mu, sigma = model(x)
+                        mu_timestamp.append(mu.cpu().detach().numpy())
+                        sigma_timestamp.append(sigma.cpu().detach().numpy())
 
-        train_loss.append(float(np.mean(losses)))
+                # Save mu and sigma matrices
+                name = 'Results/RealityMining'
+                save_sigma_mu = True
+                sigma_L_arr = []
+                mu_L_arr = []
+                if save_sigma_mu == True:
+                    sigma_L_arr.append(sigma_timestamp)
+                    mu_L_arr.append(mu_timestamp)
 
-        # -------- Val --------
-        with torch.no_grad():
-            model.eval()
-            val_vals = []
-            for i in range(train_end, val_end):
-                x, _, _, _, _, triplet, scale = dataset[i]
-                x = x.to(device)
-                _, mu, sigma = model(x)
-                val_vals.append(build_loss(triplet, scale, mu, sigma, L=64, scale=False).item())
-            val_losses.append(float(np.mean(val_vals)))
+                MAP,_ = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
+                print("Loss: ", np.mean(loss_step), "MAP: ", MAP)
 
-        # -------- Test (as a held-out monitoring metric) --------
-        with torch.no_grad():
-            model.eval()
-            test_vals = []
-            for i in range(val_end, T):
-                x, _, _, _, _, triplet, scale = dataset[i]
-                x = x.to(device)
-                _, mu, sigma = model(x)
-                test_vals.append(build_loss(triplet, scale, mu, sigma, L=64, scale=False).item())
-            test_loss.append(float(np.mean(test_vals)))
-
-
-        # -------- MAP checkpoint (optional; cheap since T is small) --------
-        mu_timestamp, sigma_timestamp = [], []
-        with torch.no_grad():
-            model.eval()
-            for i in range(lookback, T):
-                x, *_ = dataset[i]
-                x = x.to(device)
-                _, mu, sigma = model(x)
-                mu_timestamp.append(mu.cpu().numpy())
-                sigma_timestamp.append(sigma.cpu().numpy())
-        mu_L_arr = [mu_timestamp]
-        sigma_L_arr = [sigma_timestamp]
-
-        map_kl = get_MAP_avg_KL_sym(mu_L_arr, sigma_L_arr, lookback, data)
-        curr_MAP, _ = get_MAP_avg(mu_L_arr, lookback, data)  # uses t -> t+1 indexing
-        print("MAP (μ-only MLP) =", curr_MAP, "    MAP (KL, μ+σ) =", map_kl)
-        print(f"Epoch {e}: Train {train_loss[-1]:.4f} | Val {val_losses[-1]:.4f} | Test {test_loss[-1]:.4f} | MAP {curr_MAP:.4f}")
-        if curr_MAP > best_MAP:
-            best_MAP, best_model = curr_MAP, model
-            print(f"Best MAP @ epoch {e}: {best_MAP:.4f}")
-
-    return best_model,random_model, val_losses, train_loss, test_loss
+    return model
 
 
-# Train/Val/Test split
-
-# train_data = {}
-# for i in range(lookback, 63):
-#     train = torch.tensor(dataset[i], dtype=torch.float32)
-#     train_data[i] = train.to(device)
-#
-# val_data = {}
-# for i in range(63, 72):
-#     val = torch.tensor(dataset[i], dtype=torch.float32)
-#     val_data[i] = val.to(device)
-#
-# test_data = {}
-# for i in range(72, 90):
-#     test = torch.tensor(dataset[i], dtype=torch.float32)
-#     test_data[i] = test.to(device)
-#
-
-
+#{'lr': 2.2307858381535968e-05, 'dim_in': 49, 'lookback': 4, 'd_conv': 3, 'd_state': 6, 'dropout': 0.17661562119283333, 'weight_decay': 1.466563344626497e-05}
 lookback = 2
-walk = 16
-model ,random_model ,  val_losses , loss_step , test_loss = optimise_mamba(lookback=lookback,dim_in=76,d_conv=4,d_state=16,dropout=0.4285,lr=0.000120,weight_decay=2.4530158734036414e-05,walk_length=walk)
+model = optimise_mamba(data,lookback=lookback,dim_in=96,d_conv=3,d_state=32,dropout=0.1766,lr=2.5e-05,weight_decay=1.4e-03)
 
-
-# model , val_losses , loss_step = optimise_mamba(lookback=lookback,window_size=96,stride=1,channel=8,pe_dim=6,num_layers=2,d_conv=4,d_state=4,dropout=0.4,lr=0.002,weight_decay=0.004,walk_length=walk)
-
-#pplot loss
-#add legend
-# y title and x title for loss vs epoch
-# from matplotlib import pyplot as plt
-# plt.semilogy(val_losses)
-# plt.semilogy(loss_step)
-# plt.semilogy(test_loss)
-# plt.legend(['Validation Loss','Training Loss','Test Loss'])
-# plt.xlabel('Epoch')
-# plt.ylabel('Loss')
-# plt.show()
-
-dataset = RMDataset(data, lookback, walk)
+dataset = RMDataset(data, lookback)
 #read the best_model.pt
 # model.load_state_dict(torch.load('best_model.pth'))
-
 mu_timestamp = []
 sigma_timestamp = []
 with torch.no_grad():
     model.eval()
     for i in range(lookback, 90):
-        x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
+        x, triplet, scale = dataset[i]
         x = x.clone().detach().requires_grad_(True).to(device)
         _, mu, sigma = model(x)
         mu_timestamp.append(mu.cpu().detach().numpy())
@@ -415,14 +348,12 @@ if save_sigma_mu == True:
     sigma_L_arr.append(sigma_timestamp)
     mu_L_arr.append(mu_timestamp)
 
-
-
 import time
 start = time.time()
 MAPS = []
 MRR = []
 for i in tqdm(range(1)):
-    curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, lookback,data)
+    curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, sigma_L_arr, lookback,data)
     MAPS.append(curr_MAP)
     MRR.append(curr_MRR)
 #print mean and std of map and mrr
@@ -432,41 +363,10 @@ print("Std MAP: ", np.std(MAPS))
 print("Std MRR: ", np.std(MRR))
 print("Time taken: ", time.time() - start)
 
-
-mu_timestamp = []
-sigma_timestamp = []
-with torch.no_grad():
-    model.eval()
-    for i in range(lookback, 90):
-        x, pe, edge_index, edge_attr, batch, triplet, scale = dataset[i]
-        x = x.clone().detach().requires_grad_(True).to(device)
-        _, mu, sigma = random_model(x)
-        mu_timestamp.append(mu.cpu().detach().numpy())
-        sigma_timestamp.append(sigma.cpu().detach().numpy())
-name = 'Results/RealityMining'
-save_sigma_mu = True
-sigma_L_arr = []
-mu_L_arr = []
 if save_sigma_mu == True:
-    sigma_L_arr.append(sigma_timestamp)
-    mu_L_arr.append(mu_timestamp)
-
-
-
-import time
-start = time.time()
-MAPS = []
-MRR = []
-for i in tqdm(range(1)):
-    curr_MAP, curr_MRR = get_MAP_avg(mu_L_arr, lookback,data)
-    MAPS.append(curr_MAP)
-    MRR.append(curr_MRR)
-#print mean and std of map and mrr
-print("Mean MAP: ", np.mean(MAPS))
-print("Mean MRR: ", np.mean(MRR))
-print("Std MAP: ", np.std(MAPS))
-print("Std MRR: ", np.std(MRR))
-print("Time taken: ", time.time() - start)
-
-
-#{'dim_in': 16, 'num_layers': 8, 'd_conv': 4, 'd_state': 32, 'dropout': 0.1589482867005636, 'lr': 0.0034744871879953997, 'weight_decay': 0.0038647580212313047}
+    if not os.path.exists(name + '/Eval_Results/saved_array'):
+        os.makedirs(name + '/Eval_Results/saved_array')
+    with open(name + '/Eval_Results/saved_array/sigma_as', 'wb') as f:
+        pickle.dump(sigma_L_arr, f)
+    with open(name + '/Eval_Results/saved_array/mu_as', 'wb') as f:
+        pickle.dump(mu_L_arr, f)
