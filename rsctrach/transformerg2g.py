@@ -69,7 +69,7 @@ class TransformerG2G(nn.Module):
                  num_layers: int = 1,
                  dropout: float = 0.0,
                  var_eps: float = 1e-6,
-                 causal_attention: bool = True  # <--- new argument
+                 causal_attention: bool = False  # <--- new argument
                  ):
         super().__init__()
         self.n = n_nodes
