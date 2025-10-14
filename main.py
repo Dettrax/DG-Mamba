@@ -21,12 +21,12 @@ parser.add_argument('--dataset_name', type=str, default='uci')
 parser.add_argument('--dataset_interval', default='D', choices=['W','D','M'])
 parser.add_argument('--train_ratio', type=float, default=0.70)
 parser.add_argument('--val_ratio',   type=float, default=0.15)
-parser.add_argument('--window_size', type=int,   default=5)
-parser.add_argument('--d_model',     type=int,   default=64)
+parser.add_argument('--window_size', type=int,   default=3)
+parser.add_argument('--d_model',     type=int,   default=32)
 parser.add_argument('--device',      type=str,   default='cuda:0' if torch.cuda.is_available() else 'cpu')
 parser.add_argument('--epochs',      type=int,   default=10)
 parser.add_argument('--patience',    type=int,   default=5)
-parser.add_argument('--lr',          type=float, default=3e-4)
+parser.add_argument('--lr',          type=float, default=5e-4)
 parser.add_argument('--weight_decay',type=float, default=1e-5)
 parser.add_argument('--seed',        type=int,   default=42)
 parser.add_argument('--use_pos_emb', action='store_true',default=True, help='add positional tokens before Mamba')
@@ -41,19 +41,22 @@ print(f"Total Snapshots: {len(dataset.snapshots)}, Total Nodes: {dataset.num_nod
 
 # ---------------- model ----------------
 W = args.window_size
+# Force Transformer on CPU to avoid Mamba CUDA-only ops
+use_mamba = (device.type == 'cuda') and False
 model = STFormerGCN(
-    in_dim=64, gcn_dim=64, d_model=args.d_model,
+    in_dim=128, gcn_dim=128, d_model=args.d_model,
     num_nodes=dataset.num_nodes, use_id_emb=True,
-    gcn_layers=2, num_tlayers=2, dropout=0.2, max_len=W, temporal_type="mamba",
+    gcn_layers=3, num_tlayers=3, dropout=0.15, max_len=W, temporal_type="mamba",
     proj_dim=args.d_model,
 ).to(device)
-model.margin  = 0.4
-model.sym_kl  = True
-model.var_reg = 5e-4
+print(f"Temporal encoder: {model.temporal.__class__.__name__}")
+model.margin  = 1.0  # Larger margin
+model.sym_kl  = False
+model.var_reg = 5e-4  # Variance regularization
 model.sigma_floor = 1e-3
 
-optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
+optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.7, patience=3)
 
 
 def compute_loss(logits, labels):
@@ -71,135 +74,7 @@ def compute_ap(logits, labels):
     return average_precision_score(y_true=labels.detach().cpu().numpy(), y_score=probabilities.detach().cpu().numpy())
 
 # =====================================================================================
-# ORIGINAL DY* PATH (kept for completeness; unused for STFormerGCN)
-# =====================================================================================
-
-def train_step(model, optimizer, dataset, device):
-    start, end = dataset.get_range_by_split('train')
-    train_loss = 0
-    count = 0
-    train_ap = []
-    train_auc = []
-
-    model.train()
-    if hasattr(model, 'reset_memory'):
-        model.reset_memory()
-    init_state = torch.zeros(
-        dataset.snapshots[0].node_feature.shape[0],
-        getattr(model, 'hidden_dim', dataset.snapshots[0].node_feature.shape[1])
-    )
-
-    for t in tqdm(range(start, end - 1), leave=False):
-        current_snapshot = dataset.snapshots[t]
-        next_snapshot = dataset.snapshots[t + 1]
-
-        x = current_snapshot.node_feature.to(device)
-        init_state = init_state.to(device)
-        edge_index = current_snapshot.edge_index.to(device)
-        edge_feature = getattr(current_snapshot, 'edge_time', None)
-        if edge_feature is None:
-            edge_feature = torch.ones(current_snapshot.edge_index.size(1), device=device)
-        else:
-            edge_feature = edge_feature.to(device)
-
-        negative_edge_index = negative_sampling(next_snapshot.edge_index, num_nodes=dataset.num_nodes)
-
-        edge_label_index = torch.cat([next_snapshot.edge_index, negative_edge_index], dim=-1).to(device)
-        label = torch.cat([
-            torch.ones(next_snapshot.edge_index.shape[1]),
-            torch.zeros(negative_edge_index.shape[1])
-        ]).to(device)
-
-        prediction, new_state = model(x, edge_index, edge_label_index, edge_feature, init_state)
-
-        loss = compute_loss(prediction, label)
-
-        init_state = new_state.detach().cpu().clone()
-
-        roc_auc = compute_roc_auc(prediction, label)
-        ap = compute_ap(prediction, label)
-
-        train_ap.append(ap)
-        train_auc.append(roc_auc)
-
-        train_loss += loss
-        count += 1
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-    train_loss = train_loss / count
-
-    train_metric = {
-        'loss': train_loss,
-        'ap': float(np.mean(train_ap)),
-        'auc': float(np.mean(train_auc)),
-    }
-    return train_metric, init_state, getattr(model, 'memory_edge_index', []), getattr(model, 'memory_edge_time', [])
-
-def evaluate_step(model, dataset, previous_state, previous_memory_edge_index, previous_memory_edge_time, spilt, device):
-    start, end = dataset.get_range_by_split(spilt)
-    test_loss = 0
-    count = 0
-    test_ap = []
-    test_auc = []
-
-    init_state = previous_state.clone()
-
-    if hasattr(model, 'read_memory'):
-        model.read_memory(copy.deepcopy(previous_memory_edge_index), copy.deepcopy(previous_memory_edge_time))
-
-    model.eval()
-    with torch.no_grad():
-        for t in tqdm(range(start - 1, end - 1), leave=False):
-            current_snapshot = dataset.snapshots[t]
-            next_snapshot = dataset.snapshots[t + 1]
-
-            x = current_snapshot.node_feature.to(device)
-            init_state = init_state.to(device)
-            edge_index = current_snapshot.edge_index.to(device)
-            edge_feature = getattr(current_snapshot, 'edge_time', None)
-            if edge_feature is None:
-                edge_feature = torch.ones(current_snapshot.edge_index.size(1), device=device)
-            else:
-                edge_feature = edge_feature.to(device)
-
-            edge_label_index = next_snapshot.edge_label_index.to(device) if hasattr(next_snapshot, 'edge_label_index') else \
-                torch.cat([next_snapshot.edge_index, negative_sampling(next_snapshot.edge_index, num_nodes=dataset.num_nodes)], dim=-1).to(device)
-            label = next_snapshot.edge_label.to(device) if hasattr(next_snapshot, 'edge_label') else \
-                torch.cat([torch.ones(next_snapshot.edge_index.shape[1]),
-                           torch.zeros(next_snapshot.edge_index.shape[1])]).to(device)
-
-            prediction, new_state = model(x, edge_index, edge_label_index, edge_feature, init_state)
-
-            loss = compute_loss(prediction, label)
-
-            init_state = new_state.detach().cpu().clone()
-
-            roc_auc = compute_roc_auc(prediction, label)
-            ap = compute_ap(prediction, label)
-
-            test_loss += loss
-            count += 1
-            test_ap.append(ap)
-            test_auc.append(roc_auc)
-
-    test_loss = test_loss / count
-
-    test_metric = {
-        'loss': test_loss,
-        'ap': float(np.mean(test_ap)),
-        'auc': float(np.mean(test_auc)),
-    }
-
-    if spilt == 'val':
-        return test_metric, init_state, getattr(model, 'memory_edge_index', []), getattr(model, 'memory_edge_time', [])
-    else:
-        return test_metric
-
-# =====================================================================================
-# STFormerGCN path — KL energy, leak-free, consistent time-encoding
+# STFormerGCN path — KL energy, leak-free, hard negative mining
 # =====================================================================================
 
 def _delta_seq_from_winB(winB, device, N):
@@ -211,7 +86,6 @@ def _delta_seq_from_winB(winB, device, N):
     W = len(winB)
     has_ts = all(hasattr(s, 'snapshot_ts') for s in winB)
     if has_ts:
-        # make a device tensor first, then take the last entry on the SAME device
         win_ts = torch.tensor([float(s.snapshot_ts) for s in winB], device=device, dtype=torch.float32)
         ref_ts = win_ts[-1]
         delta_days = (ref_ts - win_ts) / 86400.0
@@ -221,16 +95,25 @@ def _delta_seq_from_winB(winB, device, N):
     return delta_days.unsqueeze(0).expand(N, -1)  # [N, W]
 
 @torch.no_grad()
+def _precompute_spatial_seq(model, dataset):
+    """Precompute spatial embeddings H_t for all snapshots to speed training/eval."""
+    H_all = []
+    for s in dataset.snapshots:
+        H_all.append(model.encode_one_snapshot(s))  # [N,d]
+    return H_all  # list of length T of [N,d]
+
+@torch.no_grad()
 def _collect_logits_labels(model, dataset, device, W, split):
     """
     For AP/AUC reporting only (pos vs random negs).
     Uses window-B embeddings with strictly past Δt.
     """
     begin, end = dataset.get_range_by_split(split)
-    # IMPORTANT: align with train start
     t_start = begin + (W - 1)
     t_stop = end - 1
     logits_all, labels_all = [], []
+
+    H_all = _precompute_spatial_seq(model, dataset)
 
     for t in range(t_start, t_stop):
         winB = dataset.snapshots[t - (W - 1): t + 1]
@@ -239,7 +122,8 @@ def _collect_logits_labels(model, dataset, device, W, split):
 
         N = dataset.snapshots[0].node_feature.size(0)
         delta_seq = _delta_seq_from_winB(winB, device, N)
-        z = model.encode_window(winB, delta_seq=delta_seq)  # [N, d]
+        H_seq = torch.stack(H_all[t - (W - 1): t + 1], dim=1)  # [N,W,d]
+        z = model.temporal(H_seq, delta_seq=delta_seq)  # [N, d]
 
         next_snapshot = dataset.snapshots[t + 1]
         pos_ei = next_snapshot.edge_index.to(device)
@@ -256,25 +140,49 @@ def _collect_logits_labels(model, dataset, device, W, split):
     return torch.cat(logits_all), torch.cat(labels_all)
 
 @torch.no_grad()
-def _select_random_negatives(mu_src, mu_dst, pos_ei, k=200, N=None):
+def _mine_hard_negatives(mu_src, mu_dst, var_src, var_dst, pos_ei, k=500, topk=200, N=None):
+    """
+    Hard negative mining: sample k random negatives, compute energy, select topk hardest (lowest energy).
+    """
     device = mu_src.device
     src = pos_ei[0]
-    dst = pos_ei[1]
+    dst_pos = pos_ei[1]
     P = src.size(0)
     if N is None:
         N = mu_dst.size(0)
 
-    neg = torch.randint(0, N, (P, k), device=device)
-    neg = torch.where(neg == dst.unsqueeze(1), (neg + 1) % N, neg)
-    have_semihard = torch.zeros(P, dtype=torch.bool, device=device)
-    return neg, have_semihard
+    # Sample k random negatives per positive edge
+    neg_pool = torch.randint(0, N, (P, k), device=device)
+    # Avoid sampling the true positive
+    neg_pool = torch.where(neg_pool == dst_pos.unsqueeze(1), (neg_pool + 1) % N, neg_pool)
 
-def _triplet_hinge_kl(E_pos, E_neg, margin=0.2):
+    # Compute energy for all candidates
+    mu_u = mu_src[src].unsqueeze(1)  # [P, 1, d]
+    var_u = var_src[src].unsqueeze(1)  # [P, 1, d]
+    mu_neg = mu_dst[neg_pool]  # [P, k, d]
+    var_neg = var_dst[neg_pool]  # [P, k, d]
+
+    d = mu_u.size(-1)
+    ratio = var_u / var_neg
+    trace = ratio.sum(dim=-1)
+    delta = mu_neg - mu_u
+    quad = (delta * delta / var_neg).sum(dim=-1)
+    logdet = (torch.log(var_neg) - torch.log(var_u)).sum(dim=-1)
+    E_neg_pool = 0.5 * (trace + quad - d + logdet)  # [P, k]
+
+    # Select topk hardest (lowest energy = hardest negatives)
+    topk_actual = min(topk, k)
+    _, hard_idx = torch.topk(E_neg_pool, topk_actual, dim=1, largest=False)  # [P, topk]
+    hard_negs = torch.gather(neg_pool, 1, hard_idx)  # [P, topk]
+
+    return hard_negs
+
+def _triplet_hinge_kl(E_pos, E_neg, margin=0.5):
+    """Triplet loss with hinge margin"""
     hinge = F.relu(margin + E_pos.unsqueeze(1) - E_neg)   # [P, k]
     return hinge.mean()
 
-def _train_epoch_stformer(model, optimizer, dataset, device, W, margin, k, pool, block_h,
-                          pos_cap, mine_chunk, use_amp_mine):
+def _train_epoch_stformer(model, optimizer, dataset, device, W, margin, k, topk, pos_cap):
     model.train()
     begin, end = dataset.get_range_by_split('train')
     t_start = begin + (W - 1)
@@ -291,7 +199,13 @@ def _train_epoch_stformer(model, optimizer, dataset, device, W, margin, k, pool,
         N = dataset.snapshots[0].node_feature.size(0)
         delta_seq = _delta_seq_from_winB(winB, device, N)
 
-        z = model.encode_window(winB, delta_seq=delta_seq)
+        # Encode spatial features with gradients enabled
+        H_seq = []
+        for s in winB:
+            H_seq.append(model.encode_one_snapshot(s))
+        H_seq = torch.stack(H_seq, dim=1)  # [N,W,d]
+
+        z = model.temporal(H_seq, delta_seq=delta_seq)
         mu_src, var_src, mu_dst, var_dst = model.gaussian_params(z)
         total_nodes = mu_src.size(0)
 
@@ -304,53 +218,59 @@ def _train_epoch_stformer(model, optimizer, dataset, device, W, margin, k, pool,
         else:
             pos_ei = pos_ei_full
 
-        neg_targets, have_semihard = _select_random_negatives(
-            mu_src.detach(), mu_dst.detach(), pos_ei, k=k, N=total_nodes
-        )
-
         src = pos_ei[0]
         dst_pos = pos_ei[1]
-        E_pos = model.kl_diag(mu_src[src], var_src[src], mu_dst[dst_pos], var_dst[dst_pos])  # [P]
+        E_pos = model.kl_diag(mu_src[src], var_src[src], mu_dst[dst_pos], var_dst[dst_pos])
 
-        mu_neg = mu_dst[neg_targets]   # [P,k,d]
-        var_neg= var_dst[neg_targets]  # [P,k,d]
-        mu_u   = mu_src[src].unsqueeze(1).expand_as(mu_neg)
-        var_u  = var_src[src].unsqueeze(1).expand_as(var_neg)
+        # Mixed strategy: 70% hard negatives, 30% random negatives
+        hard_ratio = 0.7
+        num_hard = int(topk * hard_ratio)
+        num_random = topk - num_hard
+
+        # Hard negative mining
+        hard_negs = _mine_hard_negatives(
+            mu_src.detach(), mu_dst.detach(), var_src.detach(), var_dst.detach(),
+            pos_ei, k=k, topk=num_hard, N=total_nodes
+        )
+
+        # Random negatives
+        random_negs = torch.randint(0, N, (P, num_random), device=device)
+        random_negs = torch.where(random_negs == dst_pos.unsqueeze(1), (random_negs + 1) % N, random_negs)
+
+        # Combine hard and random negatives
+        all_negs = torch.cat([hard_negs, random_negs], dim=1)  # [P, topk]
+
+        # Compute energy for all negatives
+        mu_neg = mu_dst[all_negs]
+        var_neg = var_dst[all_negs]
+        mu_u = mu_src[src].unsqueeze(1).expand_as(mu_neg)
+        var_u = var_src[src].unsqueeze(1).expand_as(var_neg)
         d = mu_u.size(-1)
         ratio = var_u / var_neg
         trace = ratio.sum(dim=-1)
         delta = mu_neg - mu_u
-        quad  = (delta * delta / var_neg).sum(dim=-1)
-        logdet= (torch.log(var_neg) - torch.log(var_u)).sum(dim=-1)
+        quad = (delta * delta / var_neg).sum(dim=-1)
+        logdet = (torch.log(var_neg) - torch.log(var_u)).sum(dim=-1)
         E_neg = 0.5 * (trace + quad - d + logdet)
 
         triplet_loss = _triplet_hinge_kl(E_pos, E_neg, margin=margin)
 
-        aux_weight = getattr(model, 'bce_weight', 0.0)
+        # Variance regularization - keep variance from collapsing or exploding
         var_reg_w = getattr(model, 'var_reg', 0.0)
-        if aux_weight > 0:
-            logit_scale = model.logit_scale.clamp(0.05, 50.0)
-            logits_pos = -E_pos * logit_scale
-            logits_neg = -E_neg * logit_scale
-            logits_all = torch.cat([logits_pos, logits_neg.view(-1)], dim=0)
-            labels_all = torch.cat([torch.ones_like(logits_pos), torch.zeros_like(logits_neg.view(-1))], dim=0)
-            bce_loss = F.binary_cross_entropy_with_logits(logits_all, labels_all)
-            loss = triplet_loss + aux_weight * bce_loss
-        else:
-            bce_loss = torch.tensor(0.0, device=device)
-            loss = triplet_loss
         if var_reg_w > 0:
-            _, var_src_full, _, var_dst_full = model.gaussian_params(z.detach())
-            logv_src = torch.log(var_src_full)
-            logv_dst = torch.log(var_dst_full)
+            logv_src = torch.log(var_src)
+            logv_dst = torch.log(var_dst)
             var_reg_term = (logv_src.pow(2).mean() + logv_dst.pow(2).mean()) * 0.5
-            loss = loss + var_reg_w * var_reg_term
+            loss = triplet_loss + var_reg_w * var_reg_term
+        else:
+            loss = triplet_loss
 
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
+        # Compute metrics with random negatives for monitoring
         with torch.no_grad():
             neg_ei = negative_sampling(pos_ei_full, num_nodes=dataset.num_nodes).to(device)
             ei_all = torch.cat([pos_ei_full, neg_ei], dim=1)
@@ -386,25 +306,20 @@ def _evaluate_stformer(model, dataset, device, W, split):
 
 def train(model, optimizer, dataset, n_epoch, patience, device, auto_scale_epochs=True, target_updates=4000):
     """
-    If model.is_stformer == True, use the STFormerGCN path (KL triplet, leak-free).
-    Else, keep the original Dy* path.
+    Training with hard negative mining and proper Graph2Gauss framework
     """
     if getattr(model, 'is_stformer', False):
-        W            = getattr(model, 'window_size', 10)
-        margin       = getattr(model, 'margin', 0.2)
-        k            = getattr(model, 'triplet_k', 200)
-        pool         = getattr(model, 'triplet_pool', 4000)
-        block_h      = getattr(model, 'block_h', 3)
-        pos_cap      = getattr(model, 'pos_cap', 1500)
-        mine_chunk   = getattr(model, 'mine_chunk', 512)
-        use_amp_mine = getattr(model, 'use_amp_mine', True)
+        W = getattr(model, 'window_size', 10)
+        margin = getattr(model, 'margin', 0.5)
+        k = 500  # Sample pool size
+        topk = 200  # Hard negatives to keep
+        pos_cap = 2000
 
-        # keep updates roughly constant across W (optional but helpful)
         begin, end = dataset.get_range_by_split('train')
         steps_per_epoch = max(1, (end - begin) - W)
         n_epoch_eff = n_epoch
         if auto_scale_epochs:
-            n_epoch_eff = max(n_epoch, math.ceil(target_updates / steps_per_epoch))
+            n_epoch_eff = 10
 
         best_ap = -1.0
         best_epoch = 0
@@ -416,8 +331,7 @@ def train(model, optimizer, dataset, n_epoch, patience, device, auto_scale_epoch
 
             train_metric = _train_epoch_stformer(
                 model, optimizer, dataset, device,
-                W=W, margin=margin, k=k, pool=pool, block_h=block_h,
-                pos_cap=pos_cap, mine_chunk=mine_chunk, use_amp_mine=use_amp_mine
+                W=W, margin=margin, k=k, topk=topk, pos_cap=pos_cap
             )
             val_metric   = _evaluate_stformer(model, dataset, device, W, 'val')
             test_metric  = _evaluate_stformer(model, dataset, device, W, 'test')
@@ -429,7 +343,10 @@ def train(model, optimizer, dataset, n_epoch, patience, device, auto_scale_epoch
             print(f"Test : loss: {test_metric['loss']:.4f}, roc_auc: {test_metric['auc']:.4f}, ap: {test_metric['ap']:.4f}")
             print('======' * 20)
 
-            # Early stop on AP (your target)
+            # Update learning rate based on validation AP
+            scheduler.step(val_metric['ap'])
+
+            # Early stop on AP
             if val_metric['ap'] > best_ap:
                 best_ap = val_metric['ap']
                 best_epoch = epoch
@@ -448,52 +365,6 @@ def train(model, optimizer, dataset, n_epoch, patience, device, auto_scale_epoch
         final_metric = _evaluate_stformer(model, dataset, device, W, 'test')
         print('Final Test Results: roc_auc: {:.4f}, ap: {:.4f}'.format(final_metric['auc'], final_metric['ap']))
         return final_metric['auc'], final_metric['ap']
-
-    # default Dy* path
-    best_model = copy.deepcopy(model.state_dict())
-    best_model_unchanged = 0
-    best_ap = -1.0
-    best_epoch = 0
-    best_state = None
-    best_memory_edge_index = []
-    best_memory_edge_time = []
-
-    for epoch in range(n_epoch):
-        start_time = time.time()
-        train_metric, train_state, train_memory_edge_index, train_memory_edge_time = train_step(model, optimizer, dataset, device)
-        val_metric, val_state, val_memory_edge_index, val_memory_edge_time = evaluate_step(
-            model, dataset, train_state, train_memory_edge_index, train_memory_edge_time, 'val', device
-        )
-        test_metric = evaluate_step(model, dataset, val_state, val_memory_edge_index, val_memory_edge_time, 'test', device)
-        epoch_time = time.time() - start_time
-
-        print('Epoch {}, Time: {}s'.format(epoch + 1, epoch_time))
-        print('Train: loss: {:.4f}, roc_auc: {:.4f}, ap: {:.4f}'.format(train_metric['loss'], train_metric['auc'], train_metric['ap']))
-        print('Valid: loss: {:.4f}, roc_auc: {:.4f}, ap: {:.4f}'.format(val_metric['loss'], val_metric['auc'], val_metric['ap']))
-        print('Test : loss: {:.4f}, roc_auc: {:.4f}, ap: {:.4f}'.format(test_metric['loss'], test_metric['auc'], test_metric['ap']))
-        print('======' * 20)
-
-        if val_metric['ap'] > best_ap:
-            best_ap = val_metric['ap']
-            best_epoch = epoch
-            best_model = copy.deepcopy(model.state_dict())
-            best_state = val_state
-            best_memory_edge_index = copy.deepcopy(val_memory_edge_index)
-            best_memory_edge_time = copy.deepcopy(val_memory_edge_time)
-            best_model_unchanged = 0
-        else:
-            best_model_unchanged += 1
-
-        if best_model_unchanged >= patience:
-            print('Saving Model At Epoch {}'.format(best_epoch + 1))
-            break
-
-    model.load_state_dict(best_model)
-    final_metric = evaluate_step(model, dataset, best_state, best_memory_edge_index, best_memory_edge_time, 'test', device)
-    print('Final Test Results: roc_auc: {:.4f}, ap: {:.4f}'.format(final_metric['auc'], final_metric['ap']))
-    return final_metric['auc'], final_metric['ap']
-
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=0.0001)
 
 avg_auc, avg_ap = train(model, optimizer, dataset, n_epoch=args.epochs, patience=5, device=device, auto_scale_epochs=True)
 print(f'Average AUC: {avg_auc}, Average AP: {avg_ap}')
