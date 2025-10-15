@@ -86,51 +86,29 @@ class TemporalMamba(nn.Module):
             self.blocks.append(Mamba(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand))
             self.drops.append(nn.Dropout(dropout))
 
-    def forward(self, x_seq, delta_seq=None):  # x_seq: [N,W,d], delta_seq: [N,W]
-        N, W, D = x_seq.shape
-        # pos = torch.arange(W, device=x_seq.device).unsqueeze(0).expand(N, W)
-        # rec = torch.sigmoid(self.recency_logit[:W]).view(1, W, 1)
+    # --- drop-in replacement for TemporalMamba.forward in model.py ---
 
-        x = x_seq #* rec + self.pos_emb(pos)
+    def forward(self, x_seq, delta_seq=None):  # x_seq: [N, W, d], delta_seq: [N, W]
+        # 1) add time features
+        x = x_seq
         if delta_seq is not None:
-            x = x + self.time_emb(delta_seq)
+            x = x + self.time_emb(delta_seq)  # [N, W, d]
 
+        # 2) add (learned) position embedding per step
+        N, W, D = x.shape
+        pos = torch.arange(W, device=x.device)
+        x = x + self.pos_emb(pos)[None, :, :]  # [N, W, d]
+
+        # 3) Mamba blocks (pre-norm + residual)
         z = x
         for ln, blk, dr in zip(self.norms, self.blocks, self.drops):
-            z = dr(blk(ln(z)))  # residual pre-norm
-        out = z[:, -1, :]  # [N,d], take the last output
-        # attn = torch.softmax(self.pool(z).squeeze(-1), dim=1)  # [N,W]
-        # out  = torch.einsum('nw,nwd->nd', attn, z)             # [N,d]
+            z = z + dr(blk(ln(z)))  # residual path that can integrate over the whole window
+
+        # 4) recency-aware pooling over time (learned softmax weights)
+        w = torch.softmax(self.recency_logit[:W], dim=0)  # [W]
+        out = (z * w.view(1, W, 1)).sum(dim=1)  # [N, d]
         return out
 
-# ---------------- Temporal encoder ----------------
-class TemporalTransformer(nn.Module):
-    def __init__(self, d_model, nhead=4, num_layers=2, max_len=64, dropout=0.1):
-        super().__init__()
-        self.pos_emb = nn.Embedding(max_len, d_model)
-        self.recency_logit = nn.Parameter(torch.zeros(max_len))
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=nhead, dim_feedforward=4 * d_model,
-            dropout=dropout, batch_first=True
-        )
-        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
-
-        self.pool = nn.Linear(d_model, 1)
-        self.time_emb = FourierTime(d_model, num_freq=8)
-
-    def forward(self, x_seq, delta_seq=None):  # x_seq: [N,W,d], delta_seq: [N,W]
-        N, W, D = x_seq.shape
-        pos = torch.arange(W, device=x_seq.device).unsqueeze(0).expand(N, W)
-        rec = torch.sigmoid(self.recency_logit[:W]).view(1, W, 1)
-
-        x = x_seq * rec + self.pos_emb(pos)
-        if delta_seq is not None:
-            x = x + self.time_emb(delta_seq)
-
-        z_seq = self.encoder(x)                   # [N,W,d]
-        attn  = torch.softmax(self.pool(z_seq).squeeze(-1), dim=1)
-        z     = torch.einsum('nw,nwd->nd', attn, z_seq)
-        return z
 
 # ---------------- Main model ----------------
 class STFormerGCN(nn.Module):
@@ -160,10 +138,7 @@ class STFormerGCN(nn.Module):
 
         if temporal_type.lower() == "mamba":
             self.temporal = TemporalMamba(d_model, num_layers=num_tlayers, max_len=max_len,
-                                          dropout=dropout, d_state=16, d_conv=4, expand=2)
-        else:
-            self.temporal = TemporalTransformer(d_model, nhead=nhead, num_layers=num_tlayers,
-                                                max_len=max_len, dropout=dropout)
+                                          dropout=dropout, d_state=32, d_conv=4, expand=2)
 
         # Gaussian heads
         self.mu_src_head  = nn.Linear(d_model, d_model)

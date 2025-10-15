@@ -65,7 +65,6 @@ model.pos_cap = 1500
 model.mine_chunk = 512
 model.use_amp_mine = True
 model.bce_weight = 1.0
-model.sym_kl = False
 model.var_reg = 0.0
 
 def compute_loss(logits, labels):
@@ -267,19 +266,73 @@ def _collect_logits_labels(model, dataset, device, W, split):
         return None, None
     return torch.cat(logits_all), torch.cat(labels_all)
 
+# --- add this in main.py (near other helpers) ---
 @torch.no_grad()
-def _select_random_negatives(mu_src, mu_dst, pos_ei, k=200, N=None):
+def _select_semihard_negatives(mu_src, var_src, mu_dst, var_dst, pos_ei,
+                               k=200, pool=2000, block_h=2.0, chunk=512):
+    """
+    Semi-hard mining:
+      for each positive (u,v+), sample `pool` candidates v~, keep those with
+      energy just above E_pos but within a margin `block_h`, else fall back to hardest.
+    Returns: [P, k] neg indices, and a boolean mask indicating who got true semihards.
+    """
     device = mu_src.device
-    src = pos_ei[0]
-    dst = pos_ei[1]
-    P = src.size(0)
-    if N is None:
-        N = mu_dst.size(0)
+    src = pos_ei[0]; dst = pos_ei[1]
+    P = src.size(0); N = mu_dst.size(0)
+    neg_out = []
+    have_sh = torch.zeros(P, dtype=torch.bool, device=device)
 
-    neg = torch.randint(0, N, (P, k), device=device)
-    neg = torch.where(neg == dst.unsqueeze(1), (neg + 1) % N, neg)
-    have_semihard = torch.zeros(P, dtype=torch.bool, device=device)
-    return neg, have_semihard
+    def kl_diag(mu1, var1, mu2, var2):
+        d = mu1.size(-1)
+        ratio = var1 / var2
+        trace = ratio.sum(dim=-1)
+        delta = mu2 - mu1
+        quad  = (delta * delta / var2).sum(dim=-1)
+        logdet= (torch.log(var2) - torch.log(var1)).sum(dim=-1)
+        return 0.5 * (trace + quad - d + logdet)
+
+    for i0 in range(0, P, chunk):
+        i1 = min(i0 + chunk, P)
+        s   = src[i0:i1]
+        dp  = dst[i0:i1]
+        bsz = i1 - i0
+
+        cand = torch.randint(0, N, (bsz, pool), device=device)
+        cand = torch.where(cand == dp.unsqueeze(1), (cand + 1) % N, cand)
+
+        mu_u  = mu_src[s].unsqueeze(1).expand(bsz, pool, -1)
+        var_u = var_src[s].unsqueeze(1).expand_as(mu_u)
+        mu_v  = mu_dst[cand]
+        var_v = var_dst[cand]
+
+        E_neg = kl_diag(mu_u, var_u, mu_v, var_v)                 # [bsz, pool]
+        E_pos = kl_diag(mu_src[s], var_src[s], mu_dst[dp], var_dst[dp])  # [bsz]
+
+        # semi-hard: E_pos < E_neg < E_pos + block_h
+        mask = (E_neg > E_pos.unsqueeze(1)) & (E_neg < (E_pos + block_h).unsqueeze(1))
+
+        chosen = torch.empty(bsz, k, dtype=torch.long, device=device)
+        has = torch.zeros(bsz, dtype=torch.bool, device=device)
+
+        for r in range(bsz):
+            idx = torch.nonzero(mask[r], as_tuple=False).squeeze(-1)
+            if idx.numel() >= k:
+                perm = torch.randperm(idx.numel(), device=device)[:k]
+                chosen[r] = cand[r, idx[perm]]
+                has[r] = True
+            else:
+                # fallback: hardest above E_pos
+                above = E_neg[r].clone()
+                above[E_neg[r] <= E_pos[r]] = -1e9
+                top = torch.topk(above, k, largest=True).indices
+                chosen[r] = cand[r, top]
+
+        neg_out.append(chosen)
+        have_sh[i0:i1] = has
+
+    neg = torch.cat(neg_out, dim=0)  # [P, k]
+    return neg, have_sh
+
 
 def _triplet_hinge_kl(E_pos, E_neg, margin=0.2):
     hinge = F.relu(margin + E_pos.unsqueeze(1) - E_neg)   # [P, k]
@@ -316,8 +369,9 @@ def _train_epoch_stformer(model, optimizer, dataset, device, W, margin, k, pool,
         else:
             pos_ei = pos_ei_full
 
-        neg_targets, have_semihard = _select_random_negatives(
-            mu_src.detach(), mu_dst.detach(), pos_ei, k=k, N=total_nodes
+        neg_targets, have_semihard = _select_semihard_negatives(
+            mu_src.detach(), var_src.detach(), mu_dst.detach(), var_dst.detach(),
+            pos_ei, k=k, pool=pool, block_h=block_h, chunk=mine_chunk
         )
 
         src = pos_ei[0]

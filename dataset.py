@@ -98,7 +98,7 @@ class UCIDataset():
         edge_index = torch.Tensor(df_trans[['SRC', 'DST']].values.transpose()).long()
         num_nodes = torch.max(edge_index) + 1
 
-        node_feature = torch.rand(num_nodes, 128)
+        node_feature = torch.rand(num_nodes, 32)
 
         node_id = torch.arange(num_nodes)
 
