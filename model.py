@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GCNConv , SAGEConv
 
 # ---- Freeze all seeds for reproducibility ----
 def freeze_all_seeds(seed=42):
@@ -48,6 +48,65 @@ class SpatialGCN(nn.Module):
             if li < self.num_layers - 1:
                 x = F.leaky_relu(x)
         return x  # [N, out_dim]
+
+class SpatialBiSAGE(nn.Module):
+    """
+    Direction-aware Spatial Encoder:
+      - SAGE over out-edges (u->v) and over in-edges (v->u).
+      - Learned gate mixes them per feature.
+      - Residual path projects when dims change.
+    """
+    def __init__(self, in_dim, hidden_dim, out_dim, num_layers=2, dropout=0.1):
+        super().__init__()
+        self.num_layers = num_layers
+        self.dropout = dropout
+
+        # dims[0] -> dims[1] -> ... -> dims[num_layers]
+        dims = [in_dim] + [hidden_dim] * (num_layers - 1) + [out_dim]
+
+        self.out_convs = nn.ModuleList([SAGEConv(dims[i], dims[i+1]) for i in range(num_layers)])
+        self.in_convs  = nn.ModuleList([SAGEConv(dims[i], dims[i+1]) for i in range(num_layers)])
+
+        # gate to mix [h_out || h_in] -> h
+        self.gates = nn.ModuleList([nn.Linear(2 * dims[i+1], dims[i+1]) for i in range(num_layers)])
+
+        # residual projection when dims change
+        self.res_projs = nn.ModuleList([
+            nn.Identity() if dims[i] == dims[i+1] else nn.Linear(dims[i], dims[i+1])
+            for i in range(num_layers)
+        ])
+
+        self.norms = nn.ModuleList([nn.LayerNorm(dims[i+1]) for i in range(num_layers)])
+        self.act = nn.LeakyReLU(0.1)
+
+    def edge_dropout(self, edge_index, p):
+        if (not self.training) or p <= 0.0:
+            return edge_index
+        m = edge_index.size(1)
+        keep = torch.rand(m, device=edge_index.device) > p
+        return edge_index[:, keep]
+
+    def forward(self, x, edge_index):
+        ei = edge_index
+        for li in range(self.num_layers):
+            # drop edges before this layer (not on last layer)
+            ei_drop = self.edge_dropout(ei, self.dropout) if li < self.num_layers - 1 else ei
+            ei_rev  = torch.stack([ei_drop[1], ei_drop[0]], dim=0)
+
+            h_out = self.out_convs[li](x, ei_drop)   # u -> v
+            h_in  = self.in_convs [li](x, ei_rev)    # v -> u
+
+            H = torch.cat([h_out, h_in], dim=-1)
+            g = torch.sigmoid(self.gates[li](H))
+            h = g * h_out + (1.0 - g) * h_in
+
+            # residual with projection if needed
+            x_res = self.res_projs[li](x)
+            x = self.norms[li](x_res + F.dropout(h, p=self.dropout, training=self.training))
+            if li < (self.num_layers - 1):
+                x = self.act(x)
+        return x
+
 
 class FourierTime(nn.Module):
     def __init__(self, d_model, num_freq=8):
@@ -118,7 +177,9 @@ class STFormerGCN(nn.Module):
                  nhead=8, num_tlayers=2, gcn_layers=2,
                  dropout=0.1, max_len=64,
                  sigma_floor=1e-4,
-                 temporal_type: str = "mamba"):
+                 temporal_type: str = "mamba",
+                 spatial_type: str = "bisage",      # NEW: 'gcn' or 'bisage'
+                 directed: bool = False):        # NEW: if True, use forward-only energy
         super().__init__()
         self.is_stformer = True
         self.in_dim = in_dim
@@ -127,15 +188,20 @@ class STFormerGCN(nn.Module):
         self.num_nodes = num_nodes
         self.use_id_emb = use_id_emb
         self.sigma_floor = sigma_floor
-        self.sym_kl = True
+        self.directed = directed
         self.var_reg = 0.0
 
         if self.use_id_emb:
             self.id_emb = nn.Embedding(num_nodes, in_dim)
             self.id_drop = nn.Dropout(p=0.2)
 
-        self.spatial = SpatialGCN(in_dim, gcn_dim, d_model, num_layers=gcn_layers, dropout=dropout)
+        # --- Spatial encoder choice ---
+        if spatial_type.lower() == "bisage":
+            self.spatial = SpatialBiSAGE(in_dim, gcn_dim, d_model, num_layers=gcn_layers, dropout=dropout)
+        else:
+            self.spatial = SpatialGCN(in_dim, gcn_dim, d_model, num_layers=gcn_layers, dropout=dropout)
 
+        # --- Temporal encoder (unchanged) ---
         if temporal_type.lower() == "mamba":
             self.temporal = TemporalMamba(d_model, num_layers=num_tlayers, max_len=max_len,
                                           dropout=dropout, d_state=32, d_conv=4, expand=2)
@@ -146,15 +212,11 @@ class STFormerGCN(nn.Module):
         self.mu_dst_head  = nn.Linear(d_model, d_model)
         self.rho_dst_head = nn.Linear(d_model, d_model)
 
-        self.src_proj = nn.Linear(d_model, d_model, bias=False)
-        self.dst_proj = nn.Linear(d_model, d_model, bias=False)
-
         self.window_size = getattr(self, 'window_size', 10)
         self.logit_scale = nn.Parameter(torch.tensor(2.5))
 
     # ---- Encoders ----
     def encode_one_snapshot(self, snapshot):
-        # Always pull the device from the model (robust to .to(...))
         dev = next(self.parameters()).device
         ei = snapshot.edge_index.to(dev)
         if self.use_id_emb:
@@ -162,8 +224,8 @@ class STFormerGCN(nn.Module):
             if self.training:
                 x = self.id_drop(x)
         else:
-            x = snapshot.node_feature
-        h = self.spatial(x.to(dev), ei)  # [N, d_model]
+            x = snapshot.node_feature.to(dev)
+        h = self.spatial(x, ei)  # [N, d_model]
         return h
 
     def encode_window(self, snapshots, delta_seq=None):
@@ -188,18 +250,21 @@ class STFormerGCN(nn.Module):
         ratio = var1 / var2
         trace = ratio.sum(dim=-1)
         delta = mu2 - mu1
-        quad = (delta * delta / var2).sum(dim=-1)
-        logdet = (torch.log(var2) - torch.log(var1)).sum(dim=-1)
+        quad  = (delta * delta / var2).sum(dim=-1)
+        logdet= (torch.log(var2) - torch.log(var1)).sum(dim=-1)
         return 0.5 * (trace + quad - d + logdet)
 
-    def energy_kl(self, mu_src, var_src, mu_dst, var_dst, edge_index):
+    def energy(self, mu_src, var_src, mu_dst, var_dst, edge_index):
         u, v = edge_index
         e_fwd = self.kl_diag(mu_src[u], var_src[u], mu_dst[v], var_dst[v])
+        if self.directed:
+            return e_fwd
+        # fallback to symmetric if graph is undirected
         e_bwd = self.kl_diag(mu_dst[v], var_dst[v], mu_src[u], var_src[u])
-        return 0.5 * (e_fwd + e_bwd)          # **always** symmetric
+        return 0.5 * (e_fwd + e_bwd)
 
     def score_edges(self, z, edge_index):
         mu_src, var_src, mu_dst, var_dst = self.gaussian_params(z)
-        energy = self.energy_kl(mu_src, var_src, mu_dst, var_dst, edge_index)
+        energy = self.energy(mu_src, var_src, mu_dst, var_dst, edge_index)
         logits = -energy * self.logit_scale.clamp(min=0.05, max=50.0)
         return logits
