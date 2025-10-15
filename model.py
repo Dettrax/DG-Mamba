@@ -149,7 +149,7 @@ class STFormerGCN(nn.Module):
         self.num_nodes = num_nodes
         self.use_id_emb = use_id_emb
         self.sigma_floor = sigma_floor
-        self.sym_kl = False
+        self.sym_kl = True
         self.var_reg = 0.0
 
         if self.use_id_emb:
@@ -174,8 +174,7 @@ class STFormerGCN(nn.Module):
         self.src_proj = nn.Linear(d_model, d_model, bias=False)
         self.dst_proj = nn.Linear(d_model, d_model, bias=False)
 
-        # Ensure training loop uses the intended window size
-        self.window_size = max_len
+        self.window_size = getattr(self, 'window_size', 10)
         self.logit_scale = nn.Parameter(torch.tensor(2.5))
 
     # ---- Encoders ----
@@ -220,7 +219,12 @@ class STFormerGCN(nn.Module):
 
     def energy_kl(self, mu_src, var_src, mu_dst, var_dst, edge_index):
         u, v = edge_index
-        e_forward = self.kl_diag(mu_src[u], var_src[u], mu_dst[v], var_dst[v])
-        if self.sym_kl:
-            e_backward = self.kl_diag(mu_dst[v], var_dst[v], mu_src[u], var_src[u])
-            return 0.5
+        e_fwd = self.kl_diag(mu_src[u], var_src[u], mu_dst[v], var_dst[v])
+        e_bwd = self.kl_diag(mu_dst[v], var_dst[v], mu_src[u], var_src[u])
+        return 0.5 * (e_fwd + e_bwd)          # **always** symmetric
+
+    def score_edges(self, z, edge_index):
+        mu_src, var_src, mu_dst, var_dst = self.gaussian_params(z)
+        energy = self.energy_kl(mu_src, var_src, mu_dst, var_dst, edge_index)
+        logits = -energy * self.logit_scale.clamp(min=0.05, max=50.0)
+        return logits

@@ -22,7 +22,7 @@ parser.add_argument('--dataset_interval', default='D', choices=['W','D','M'])
 parser.add_argument('--train_ratio', type=float, default=0.70)
 parser.add_argument('--val_ratio',   type=float, default=0.15)
 parser.add_argument('--window_size', type=int,   default=5)
-parser.add_argument('--d_model',     type=int,   default=64)
+parser.add_argument('--d_model',     type=int,   default=32)
 parser.add_argument('--device',      type=str,   default='cuda:0' if torch.cuda.is_available() else 'cpu')
 parser.add_argument('--epochs',      type=int,   default=10)
 parser.add_argument('--patience',    type=int,   default=5)
@@ -39,22 +39,34 @@ device = torch.device(args.device)
 dataset = get_dataset(args)
 print(f"Total Snapshots: {len(dataset.snapshots)}, Total Nodes: {dataset.num_nodes}, Total Edges: {dataset.num_edges}")
 
-# ---------------- model ----------------
-W = args.window_size
 model = STFormerGCN(
-    in_dim=64, gcn_dim=64, d_model=args.d_model,
-    num_nodes=dataset.num_nodes, use_id_emb=True,
-    gcn_layers=2, num_tlayers=2, dropout=0.2, max_len=W, temporal_type="mamba",
+    in_dim=128,
+    gcn_dim=128,
+    d_model=args.d_model,
     proj_dim=args.d_model,
+    num_nodes=dataset.num_nodes,
+    use_id_emb=True,
+    nhead=4,
+    num_tlayers=3,
+    gcn_layers=2,
+    dropout=0.3,
+    max_len=args.window_size,
+    sigma_floor=1e-4,
+    temporal_type="mamba"  # if mamba-ssm not available, set to "transformer"
 ).to(device)
-model.margin  = 0.4
-model.sym_kl  = True
-model.var_reg = 5e-4
-model.sigma_floor = 1e-3
 
-optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
-
+# training knobs for KL triplet
+model.window_size = args.window_size
+model.margin = 0.2
+model.triplet_k = 200
+model.triplet_pool = 4000
+model.block_h = 3
+model.pos_cap = 1500
+model.mine_chunk = 512
+model.use_amp_mine = True
+model.bce_weight = 1.0
+model.sym_kl = False
+model.var_reg = 0.0
 
 def compute_loss(logits, labels):
     fn = torch.nn.BCEWithLogitsLoss()
@@ -199,13 +211,13 @@ def evaluate_step(model, dataset, previous_state, previous_memory_edge_index, pr
         return test_metric
 
 # =====================================================================================
-# STFormerGCN path — KL energy, leak-free, consistent time-encoding
+# STFormerGCN path â€” KL energy, leak-free, consistent time-encoding
 # =====================================================================================
 
 def _delta_seq_from_winB(winB, device, N):
     """
     Strictly past time encoding:
-      Δt per step computed relative to the last step in the window (winB[-1]).
+      Î”t per step computed relative to the last step in the window (winB[-1]).
     Returns: [N, W] tensor (days).
     """
     W = len(winB)
@@ -224,7 +236,7 @@ def _delta_seq_from_winB(winB, device, N):
 def _collect_logits_labels(model, dataset, device, W, split):
     """
     For AP/AUC reporting only (pos vs random negs).
-    Uses window-B embeddings with strictly past Δt.
+    Uses window-B embeddings with strictly past Î”t.
     """
     begin, end = dataset.get_range_by_split(split)
     # IMPORTANT: align with train start
@@ -495,5 +507,5 @@ def train(model, optimizer, dataset, n_epoch, patience, device, auto_scale_epoch
 
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=0.0001)
 
-avg_auc, avg_ap = train(model, optimizer, dataset, n_epoch=args.epochs, patience=5, device=device, auto_scale_epochs=True)
+avg_auc, avg_ap = train(model, optimizer, dataset, n_epoch=50, patience=10, device=device, auto_scale_epochs=True)
 print(f'Average AUC: {avg_auc}, Average AP: {avg_ap}')
