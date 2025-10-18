@@ -6,13 +6,10 @@ from sklearn.preprocessing import OrdinalEncoder
 import math
 
 import torch
-from torch_geometric.utils import coalesce, structured_negative_sampling
-from torch_geometric.data import Data
 
-def negative_sampling(edge_index, num_nodes=None):
-    src, dst, neg_dst = structured_negative_sampling(edge_index, num_nodes=num_nodes)
-    negative_edge_index = torch.stack((src, neg_dst), dim=0)
-    return negative_edge_index
+from torch_geometric.utils import coalesce
+from torch_geometric.data import Data
+from dataloader.utils import negative_sampling
 
 class UCIDataset():
     def __init__(self, url, file_name, interval, train_ratio, val_ratio):
@@ -37,7 +34,7 @@ class UCIDataset():
 
         self.snapshots = []
         for snapshot in self.snapshot_list:
-            negative_edge_index = negative_sampling(snapshot.edge_index, num_nodes=self.num_nodes)
+            negative_edge_index = negative_sampling(snapshot.edge_index)
             snapshot.edge_label_index = torch.cat([snapshot.edge_index,
                                                    negative_edge_index], dim=-1)
             snapshot.edge_label = torch.cat([
@@ -98,7 +95,7 @@ class UCIDataset():
         edge_index = torch.Tensor(df_trans[['SRC', 'DST']].values.transpose()).long()
         num_nodes = torch.max(edge_index) + 1
 
-        node_feature = torch.rand(num_nodes, 32)
+        node_feature = torch.rand(num_nodes, 64)
 
         node_id = torch.arange(num_nodes)
 
@@ -111,41 +108,50 @@ class UCIDataset():
     def split_by_seconds(self, freq_sec):
         split_criterion = self.graph.edge_time // freq_sec
         groups = torch.sort(torch.unique(split_criterion))[0]
-        self.snapshot_list = []
-        for gid in groups:
-            period_members = (split_criterion == gid)
-            ei = self.graph.edge_index[:, period_members]
-            ei = coalesce(ei)
+        self.snapshot_list = list()
+        for t in groups:
+            period_members = (split_criterion == t)
+            g = Data(node_feature=self.graph.node_feature,
+                      edge_index=self.graph.edge_index[:, period_members]
+                      )
+            g.edge_index = coalesce(g.edge_index)
 
-            if ei.size(1) > 2:
-                g = Data(node_feature=self.graph.node_feature, edge_index=ei)
-                # use the latest true timestamp inside this bin
-                ts = self.graph.edge_time[period_members].max().item()
-                g.snapshot_ts = float(ts)  # <-- critical for true Δt
-                self.snapshot_list.append(g)
+            if g.edge_index.shape[1] > 2:
+              self.snapshot_list.append(g)
 
     def make_graph_snapshot(self):
         t = self.graph.edge_time.numpy().astype(np.int64)
+
         period_split = pd.DataFrame(
             {'Timestamp': t, 'TransactionTime': pd.to_datetime(t, unit='s')},
             index=range(len(self.graph.edge_time))
         )
-        freq_map = {'D': '%j', 'W': '%W', 'M': '%m'}
+
+        freq_map = {'D': '%j',  # day of year.
+                    'W': '%W',  # week of year.
+                    'M': '%m'}  # month of year.
+
         period_split['Year'] = period_split['TransactionTime'].dt.strftime('%Y').astype(int)
-        period_split['SubYearFlag'] = period_split['TransactionTime'].dt.strftime(freq_map[self.time_interval]).astype(
-            int)
+
+        period_split['SubYearFlag'] = period_split['TransactionTime'].dt.strftime(freq_map[self.time_interval]).astype(int)
 
         period2id = period_split.groupby(['Year', 'SubYearFlag']).indices
         periods = sorted(list(period2id.keys()))
-        self.snapshot_list = []
+        self.snapshot_list = list()
+        t = 0
         for p in periods:
-            idx = period2id[p]
-            ei = self.graph.edge_index[:, idx]
-            ei = coalesce(ei)
-            if ei.size(1) > 2:
-                g = Data(node_feature=self.graph.node_feature, edge_index=ei)
-                g.snapshot_ts = float(period_split.loc[idx, 'Timestamp'].max())  # <-- critical
-                self.snapshot_list.append(g)
+            period_members = period2id[p]
+
+            g = Data(node_feature=self.graph.node_feature,
+                      edge_index=self.graph.edge_index[:, period_members],
+                      )
+
+            g.edge_index = coalesce(g.edge_index)
+
+            if g.edge_index.shape[1] > 2:
+              g.edge_time = torch.full((g.edge_index.shape[1], ), t + 1)
+              t = t + 1
+              self.snapshot_list.append(g)
 
 class SXDataset():
     def __init__(self, url, file_name, interval, train_ratio, val_ratio):
@@ -170,7 +176,7 @@ class SXDataset():
 
         self.snapshots = []
         for snapshot in self.snapshot_list:
-            negative_edge_index = negative_sampling(snapshot.edge_index, num_nodes=self.num_nodes)
+            negative_edge_index = negative_sampling(snapshot.edge_index)
             snapshot.edge_label_index = torch.cat([snapshot.edge_index,
                                                    negative_edge_index], dim=-1)
             snapshot.edge_label = torch.cat([
@@ -308,7 +314,7 @@ class BitCoinDataset():
 
         self.snapshots = []
         for snapshot in self.snapshot_list:
-            negative_edge_index = negative_sampling(snapshot.edge_index, num_nodes=self.num_nodes)
+            negative_edge_index = negative_sampling(snapshot.edge_index)
             snapshot.edge_label_index = torch.cat([snapshot.edge_index,
                                                    negative_edge_index], dim=-1)
             snapshot.edge_label = torch.cat([
@@ -442,7 +448,7 @@ class TechDataset():
 
         self.snapshots = []
         for snapshot in self.snapshot_list:
-            negative_edge_index = negative_sampling(snapshot.edge_index, num_nodes=self.num_nodes)
+            negative_edge_index = negative_sampling(snapshot.edge_index)
             snapshot.edge_label_index = torch.cat([snapshot.edge_index,
                                                    negative_edge_index], dim=-1)
             snapshot.edge_label = torch.cat([
