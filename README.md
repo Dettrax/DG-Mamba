@@ -1,4 +1,4 @@
-# DG-Mamba: Efficient Dynamic Graph Embedding with Mamba Architecture
+# GDG-Mamba: Dynamic Graph Embedding based on Mamba
 
 ## About the Project
 
