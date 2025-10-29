@@ -79,17 +79,7 @@ The configurations, such as `lookback` and `embedding_size`, are set in the `con
 
 If you find this repository or the released model helpful, please cite our paper.
 
-Pandey, Ashish Parmanand, Alan John Varghese, Sarang Patil, and Mengjia Xu. "A Comparative Study on Dynamic Graph Embedding based on Mamba and Transformers." arXiv preprint arXiv:2412.11293 (2024).
 
-```bash
-@article{pandey2024comparative,
-  title={A Comparative Study on Dynamic Graph Embedding based on Mamba and Transformers},
-  author={Pandey, Ashish Parmanand and Varghese, Alan John and Patil, Sarang and Xu, Mengjia},
-  journal={arXiv preprint arXiv:2412.11293},
-  year={2024}
-}
-
-```
 
 (If you have any questions or suggestions, please do not hesitate to contact us or open an issue on the GitHub repository. Your feedback is greatly appreciated!)
 
