@@ -8,8 +8,8 @@ DG-Mamba is a novel framework for dynamic graph embedding, designed to model com
 - Integration of probabilistic embeddings for uncertainty quantification.
 - Enhanced spatial and temporal representation learning.
 
-This implementation is based on the research paper titled "A Comparative Study on Dynamic Graph Embedding Based on Mamba and Transformers", which introduces DG-Mamba and its variant GDG-Mamba. The models outperform transformer-based approaches, particularly in datasets with high temporal variability, such as Reality Mining and Bitcoin.
-https://arxiv.org/pdf/2412.11293
+This implementation is based on the research paper titled GDG-Mamba: Dynamic Graph Embedding based on Mamba.
+
 
 ## Features
 
